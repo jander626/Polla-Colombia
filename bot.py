@@ -75,6 +75,25 @@ def get_standings() -> list:
     return []
 
 
+STAGE_NAMES = {
+    "GROUP_STAGE": "Fase de grupos",
+    "LAST_32": "Dieciseisavos de final",
+    "LAST_16": "Octavos de final",
+    "QUARTER_FINALS": "Cuartos de final",
+    "SEMI_FINALS": "Semifinales",
+    "THIRD_PLACE": "Tercer puesto",
+    "FINAL": "Final",
+}
+
+
+def stage_label(match: dict) -> str:
+    """Human-readable stage/group label, safe for Telegram Markdown
+    (raw API values like GROUP_A contain underscores that break parsing)."""
+    stage = STAGE_NAMES.get(match.get("stage", ""), match.get("stage", "").replace("_", " "))
+    group = (match.get("group") or "").replace("GROUP_", "Grupo ").replace("_", " ")
+    return f"{stage} — {group}" if group else stage
+
+
 def match_display_name(match: dict) -> str:
     home = match.get("homeTeam", {}).get("name", "?")
     away = match.get("awayTeam", {}).get("name", "?")
@@ -155,7 +174,9 @@ Basado en todo lo anterior, proporciona:
 Sé conciso y directo. Formato limpio para Telegram."""
 
 
-def analyze_match(match: dict, standings: list) -> str:
+def analyze_match(match: dict, standings: list) -> Optional[str]:
+    """Returns the analysis text, or None if the Claude API call failed
+    (so callers can retry on the next run instead of marking it as sent)."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_analysis_prompt(match, standings)
 
@@ -176,7 +197,8 @@ def analyze_match(match: dict, standings: list) -> str:
                 messages=[{"role": "user", "content": prompt}],
             )
         except Exception as e2:
-            return f"⚠️ Error al generar análisis: {e2}"
+            print(f"[ERROR] Claude API fallback: {e2}")
+            return None
 
     # Extract text from response blocks
     text_parts = []
@@ -225,16 +247,13 @@ def format_forecast_message(match: dict, analysis: str) -> str:
     away = match.get("awayTeam", {}).get("name", "?")
     ko = match_kickoff_utc(match)
     ko_str = ko.strftime("%d/%m/%Y %H:%M UTC") if ko else "?"
-    stage = match.get("stage", "")
-    group = match.get("group", "")
-    stage_label = f"{stage} {group}".strip()
 
     header = (
         f"🌍 *PRONÓSTICO MUNDIAL 2026*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚽ *{home} vs {away}*\n"
         f"📅 {ko_str}\n"
-        f"🏆 {stage_label}\n"
+        f"🏆 {stage_label(match)}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     return header + analysis
@@ -253,10 +272,7 @@ def cmd_proximos(chat_id: str) -> None:
         ko = match_kickoff_utc(m)
         ko_str = ko.strftime("%d/%m %H:%M UTC") if ko else "?"
         name = match_display_name(m)
-        stage = m.get("stage", "")
-        group = m.get("group", "")
-        label = f"({stage} {group})".strip("( )")
-        lines.append(f"{i}. *{name}*\n   📅 {ko_str} — {label}")
+        lines.append(f"{i}. *{name}*\n   📅 {ko_str} — {stage_label(m)}")
 
     tg_send(chat_id, "\n".join(lines))
 
@@ -289,6 +305,9 @@ def cmd_pronostico(chat_id: str, args: str, state: dict) -> None:
     tg_send(chat_id, f"🔍 Analizando *{match_display_name(target)}*… (puede tardar 20-30 segundos)")
     standings = get_standings()
     analysis = analyze_match(target, standings)
+    if analysis is None:
+        tg_send(chat_id, "⚠️ No pude generar el análisis (problema con la API de Claude, posiblemente sin créditos). Intenta más tarde.")
+        return
     msg = format_forecast_message(target, analysis)
     tg_send(chat_id, msg)
 
@@ -332,6 +351,12 @@ def run_auto_forecasts(state: dict) -> bool:
         print(f"[INFO] Sending forecast for {name} (kickoff in {hours_to_ko:.1f}h)")
 
         analysis = analyze_match(match, standings)
+        if analysis is None:
+            # Claude API failed (e.g. no credits) — don't mark as sent so the
+            # next run retries this match
+            print(f"[WARN] Analysis failed for {name}; will retry next run")
+            continue
+
         msg = format_forecast_message(match, analysis)
         broadcast(msg, state)
 
