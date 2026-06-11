@@ -2,8 +2,8 @@ name: World Cup Forecast Bot
 
 on:
   schedule:
-    # Runs every 30 minutes — checks for matches in the 24h window and processes Telegram commands
-    - cron: "*/30 * * * *"
+    # Runs every 5 minutes (GitHub minimum) — checks for matches in the 24h window and processes Telegram commands
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       mode:
