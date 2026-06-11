@@ -184,7 +184,7 @@ def analyze_match(match: dict, standings: list) -> Optional[str]:
 
     try:
         response = _gemini.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
@@ -197,7 +197,7 @@ def analyze_match(match: dict, standings: list) -> Optional[str]:
         # Fallback without search
         try:
             response = _gemini.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(max_output_tokens=1024),
             )
