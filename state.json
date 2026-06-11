@@ -1,5 +1,10 @@
 {
-  "sent_forecasts": [],
-  "chat_ids": [],
-  "tg_offset": 0
+  "sent_forecasts": [
+    "537327",
+    "537328"
+  ],
+  "chat_ids": [
+    "431933636"
+  ],
+  "tg_offset": 419999580
 }
