@@ -3,7 +3,7 @@
 World Cup 2026 Forecast Bot
 - Sends forecasts 24h before each match via Telegram
 - Responds to manual Telegram commands
-- Uses Claude AI with web search for analysis
+- Uses Google Gemini with Google Search grounding for analysis
 """
 
 import json
@@ -13,14 +13,17 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import anthropic
 import requests
+from google import genai
+from google.genai import types as genai_types
 
 # ── Configuration ────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 FOOTBALL_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 FOOTBALL_BASE = "https://api.football-data.org/v4"
 WORLD_CUP_ID = "WC"  # football-data.org competition code for World Cup
@@ -175,37 +178,33 @@ Sé conciso y directo. Formato limpio para Telegram."""
 
 
 def analyze_match(match: dict, standings: list) -> Optional[str]:
-    """Returns the analysis text, or None if the Claude API call failed
+    """Returns the analysis text, or None if the Gemini API call failed
     (so callers can retry on the next run instead of marking it as sent)."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = build_analysis_prompt(match, standings)
 
     try:
-        response = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=1024,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
-            messages=[{"role": "user", "content": prompt}],
+        response = _gemini.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                max_output_tokens=1024,
+            ),
         )
+        return response.text
     except Exception as e:
-        print(f"[ERROR] Claude API: {e}")
-        # Fallback without web search
+        print(f"[ERROR] Gemini API (with search): {e}")
+        # Fallback without search
         try:
-            response = client.messages.create(
-                model="claude-opus-4-8",
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
+            response = _gemini.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(max_output_tokens=1024),
             )
+            return response.text
         except Exception as e2:
-            print(f"[ERROR] Claude API fallback: {e2}")
+            print(f"[ERROR] Gemini API fallback: {e2}")
             return None
-
-    # Extract text from response blocks
-    text_parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            text_parts.append(block.text)
-    return "\n".join(text_parts).strip()
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
