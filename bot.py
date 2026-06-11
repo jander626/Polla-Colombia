@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""
+World Cup 2026 Forecast Bot
+- Sends forecasts 24h before each match via Telegram
+- Responds to manual Telegram commands
+- Uses Claude AI with web search for analysis
+"""
+
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+import anthropic
+import requests
+
+# ── Configuration ────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+FOOTBALL_API_KEY = os.environ["FOOTBALL_DATA_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+FOOTBALL_BASE = "https://api.football-data.org/v4"
+WORLD_CUP_ID = "WC"  # football-data.org competition code for World Cup
+WC2026_SEASON = 2026
+
+STATE_FILE = "state.json"
+FORECAST_WINDOW_HOURS = 24   # send forecast this many hours before kickoff
+FORECAST_REPEAT_HOURS = 2    # re-send if match is within this window and no forecast yet
+
+HEADERS = {"X-Auth-Token": FOOTBALL_API_KEY}
+
+# ── State helpers ─────────────────────────────────────────────────────────────
+
+def load_state() -> dict:
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"sent_forecasts": [], "chat_ids": []}
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+# ── Football-data.org helpers ─────────────────────────────────────────────────
+
+def get_matches(status: Optional[str] = None) -> list:
+    """Fetch WC 2026 matches, optionally filtered by status."""
+    params = {"season": WC2026_SEASON}
+    if status:
+        params["status"] = status
+    url = f"{FOOTBALL_BASE}/competitions/{WORLD_CUP_ID}/matches"
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    if resp.status_code == 200:
+        return resp.json().get("matches", [])
+    # Fallback: try without season param (some free-tier restrictions)
+    resp2 = requests.get(url, headers=HEADERS, timeout=15)
+    if resp2.status_code == 200:
+        return resp2.json().get("matches", [])
+    print(f"[WARN] Football API error {resp.status_code}: {resp.text[:200]}")
+    return []
+
+
+def get_standings() -> list:
+    """Fetch current WC 2026 group standings."""
+    url = f"{FOOTBALL_BASE}/competitions/{WORLD_CUP_ID}/standings"
+    params = {"season": WC2026_SEASON}
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    if resp.status_code == 200:
+        return resp.json().get("standings", [])
+    return []
+
+
+def match_display_name(match: dict) -> str:
+    home = match.get("homeTeam", {}).get("name", "?")
+    away = match.get("awayTeam", {}).get("name", "?")
+    return f"{home} vs {away}"
+
+
+def match_kickoff_utc(match: dict) -> Optional[datetime]:
+    dt_str = match.get("utcDate")
+    if not dt_str:
+        return None
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+
+def upcoming_matches(hours_ahead: int = 36) -> list:
+    """Return scheduled matches kicking off within the next `hours_ahead` hours."""
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(hours=hours_ahead)
+    matches = get_matches(status="SCHEDULED") + get_matches(status="TIMED")
+    result = []
+    for m in matches:
+        ko = match_kickoff_utc(m)
+        if ko and now <= ko <= cutoff:
+            result.append(m)
+    return sorted(result, key=lambda m: m.get("utcDate", ""))
+
+
+def all_upcoming_matches(limit: int = 10) -> list:
+    """Return next `limit` scheduled matches regardless of window."""
+    now = datetime.now(timezone.utc)
+    matches = get_matches(status="SCHEDULED") + get_matches(status="TIMED")
+    future = [m for m in matches if (match_kickoff_utc(m) or now) > now]
+    return sorted(future, key=lambda m: m.get("utcDate", ""))[:limit]
+
+
+# ── Claude analysis ───────────────────────────────────────────────────────────
+
+def build_analysis_prompt(match: dict, standings: list) -> str:
+    home = match.get("homeTeam", {}).get("name", "TBD")
+    away = match.get("awayTeam", {}).get("name", "TBD")
+    stage = match.get("stage", "")
+    group = match.get("group", "")
+    ko = match_kickoff_utc(match)
+    ko_str = ko.strftime("%Y-%m-%d %H:%M UTC") if ko else "?"
+
+    standings_text = ""
+    if standings:
+        for table in standings:
+            grp = table.get("group", "")
+            if group and group != grp:
+                continue
+            rows = table.get("table", [])[:6]
+            lines = [f"  {r['position']}. {r['team']['name']} — PJ:{r['playedGames']} P:{r['points']} GF:{r['goalsFor']} GC:{r['goalsAgainst']}" for r in rows]
+            if lines:
+                standings_text += f"\nGrupo {grp}:\n" + "\n".join(lines)
+
+    return f"""Eres un experto analista de fútbol. Analiza el siguiente partido del Mundial 2026 y proporciona un pronóstico detallado.
+
+PARTIDO: {home} vs {away}
+FASE: {stage} {group}
+FECHA: {ko_str}
+
+CLASIFICACIÓN ACTUAL:{standings_text if standings_text else ' No disponible'}
+
+Por favor:
+1. Busca noticias recientes (últimas 72 horas) sobre ambos equipos: lesiones, sanciones, forma reciente, declaraciones del técnico.
+2. Analiza estadísticas de los últimos 5 partidos de cada equipo.
+3. Revisa el historial de enfrentamientos directos recientes.
+4. Considera el contexto (qué necesita cada equipo según su posición en el grupo / fase del torneo).
+
+Basado en todo lo anterior, proporciona:
+
+🎯 **RESULTADO MÁS PROBABLE**: [1 (local) / X (empate) / 2 (visitante)]
+⚽ **MARCADOR PROBABLE**: X-X
+📊 **CONFIANZA**: XX%
+🔑 **FACTORES CLAVE** (3 bullets máximo)
+📝 **RESUMEN**: 2-3 oraciones explicando el pronóstico
+
+Sé conciso y directo. Formato limpio para Telegram."""
+
+
+def analyze_match(match: dict, standings: list) -> str:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    prompt = build_analysis_prompt(match, standings)
+
+    try:
+        response = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=1024,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        print(f"[ERROR] Claude API: {e}")
+        # Fallback without web search
+        try:
+            response = client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e2:
+            return f"⚠️ Error al generar análisis: {e2}"
+
+    # Extract text from response blocks
+    text_parts = []
+    for block in response.content:
+        if hasattr(block, "text"):
+            text_parts.append(block.text)
+    return "\n".join(text_parts).strip()
+
+
+# ── Telegram helpers ──────────────────────────────────────────────────────────
+
+def tg_send(chat_id: str, text: str) -> bool:
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"[ERROR] Telegram send: {e}")
+        return False
+
+
+def tg_get_updates(offset: int = 0) -> list:
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 5}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            return resp.json().get("result", [])
+    except Exception as e:
+        print(f"[ERROR] Telegram getUpdates: {e}")
+    return []
+
+
+def broadcast(text: str, state: dict) -> None:
+    """Send a message to all known chat IDs."""
+    chat_ids = set(state.get("chat_ids", []))
+    if CHAT_ID:
+        chat_ids.add(CHAT_ID)
+    for cid in chat_ids:
+        tg_send(str(cid), text)
+
+
+def format_forecast_message(match: dict, analysis: str) -> str:
+    home = match.get("homeTeam", {}).get("name", "?")
+    away = match.get("awayTeam", {}).get("name", "?")
+    ko = match_kickoff_utc(match)
+    ko_str = ko.strftime("%d/%m/%Y %H:%M UTC") if ko else "?"
+    stage = match.get("stage", "")
+    group = match.get("group", "")
+    stage_label = f"{stage} {group}".strip()
+
+    header = (
+        f"🌍 *PRONÓSTICO MUNDIAL 2026*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚽ *{home} vs {away}*\n"
+        f"📅 {ko_str}\n"
+        f"🏆 {stage_label}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    return header + analysis
+
+
+# ── Command handlers ──────────────────────────────────────────────────────────
+
+def cmd_proximos(chat_id: str) -> None:
+    matches = all_upcoming_matches(10)
+    if not matches:
+        tg_send(chat_id, "📅 No hay partidos programados próximamente.")
+        return
+
+    lines = ["🌍 *PRÓXIMOS PARTIDOS — MUNDIAL 2026*\n"]
+    for i, m in enumerate(matches, 1):
+        ko = match_kickoff_utc(m)
+        ko_str = ko.strftime("%d/%m %H:%M UTC") if ko else "?"
+        name = match_display_name(m)
+        stage = m.get("stage", "")
+        group = m.get("group", "")
+        label = f"({stage} {group})".strip("( )")
+        lines.append(f"{i}. *{name}*\n   📅 {ko_str} — {label}")
+
+    tg_send(chat_id, "\n".join(lines))
+
+
+def cmd_pronostico(chat_id: str, args: str, state: dict) -> None:
+    matches = all_upcoming_matches(20)
+    if not matches:
+        tg_send(chat_id, "No hay partidos próximos disponibles.")
+        return
+
+    # Try to match by index or team name substring
+    target = None
+    args_lower = args.lower().strip()
+
+    if args_lower.isdigit():
+        idx = int(args_lower) - 1
+        if 0 <= idx < len(matches):
+            target = matches[idx]
+    else:
+        for m in matches:
+            name = match_display_name(m).lower()
+            if args_lower in name:
+                target = m
+                break
+
+    if target is None:
+        tg_send(chat_id, f"⚠️ No encontré el partido '{args}'. Usa /proximos para ver la lista y escribe el número.")
+        return
+
+    tg_send(chat_id, f"🔍 Analizando *{match_display_name(target)}*… (puede tardar 20-30 segundos)")
+    standings = get_standings()
+    analysis = analyze_match(target, standings)
+    msg = format_forecast_message(target, analysis)
+    tg_send(chat_id, msg)
+
+
+def cmd_ayuda(chat_id: str) -> None:
+    text = (
+        "🤖 *Bot de Pronósticos — Mundial 2026*\n\n"
+        "Comandos disponibles:\n"
+        "• /proximos — Lista los próximos 10 partidos\n"
+        "• /pronostico <número o equipo> — Pide el pronóstico de un partido\n"
+        "  Ejemplo: `/pronostico 1` o `/pronostico Colombia`\n"
+        "• /ayuda — Muestra este mensaje\n\n"
+        "También recibirás pronósticos automáticos 24h antes de cada partido."
+    )
+    tg_send(chat_id, text)
+
+
+# ── Automatic forecast loop ───────────────────────────────────────────────────
+
+def run_auto_forecasts(state: dict) -> bool:
+    """Check for matches in the 24h window and send forecasts. Returns True if state changed."""
+    now = datetime.now(timezone.utc)
+    matches = upcoming_matches(hours_ahead=FORECAST_WINDOW_HOURS + 2)
+    standings = get_standings() if matches else []
+    changed = False
+
+    for match in matches:
+        match_id = str(match.get("id"))
+        ko = match_kickoff_utc(match)
+        if ko is None:
+            continue
+
+        hours_to_ko = (ko - now).total_seconds() / 3600
+        if hours_to_ko < 0 or hours_to_ko > FORECAST_WINDOW_HOURS:
+            continue
+
+        if match_id in state.get("sent_forecasts", []):
+            continue  # already sent
+
+        name = match_display_name(match)
+        print(f"[INFO] Sending forecast for {name} (kickoff in {hours_to_ko:.1f}h)")
+
+        analysis = analyze_match(match, standings)
+        msg = format_forecast_message(match, analysis)
+        broadcast(msg, state)
+
+        state.setdefault("sent_forecasts", []).append(match_id)
+        changed = True
+        time.sleep(2)  # avoid Telegram rate limiting between matches
+
+    return changed
+
+
+# ── Telegram polling for commands ─────────────────────────────────────────────
+
+def poll_commands(state: dict) -> bool:
+    """Process pending Telegram commands. Returns True if state changed."""
+    offset = state.get("tg_offset", 0)
+    updates = tg_get_updates(offset)
+    changed = False
+
+    for upd in updates:
+        offset = max(offset, upd["update_id"] + 1)
+        msg = upd.get("message") or upd.get("channel_post")
+        if not msg:
+            continue
+
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        text = msg.get("text", "").strip()
+
+        # Register chat for broadcasts
+        if chat_id and chat_id not in state.get("chat_ids", []):
+            state.setdefault("chat_ids", []).append(chat_id)
+            changed = True
+            print(f"[INFO] Registered new chat_id: {chat_id}")
+
+        if not text.startswith("/"):
+            continue
+
+        parts = text.split(None, 1)
+        command = parts[0].lower().split("@")[0]
+        args = parts[1] if len(parts) > 1 else ""
+
+        print(f"[INFO] Command '{command}' from {chat_id}")
+
+        if command == "/proximos":
+            cmd_proximos(chat_id)
+        elif command == "/pronostico":
+            if not args:
+                tg_send(chat_id, "Uso: /pronostico <número o nombre del equipo>\nEjemplo: /pronostico 1")
+            else:
+                cmd_pronostico(chat_id, args, state)
+        elif command in ("/ayuda", "/start", "/help"):
+            cmd_ayuda(chat_id)
+        else:
+            tg_send(chat_id, "Comando desconocido. Usa /ayuda para ver los comandos disponibles.")
+
+    if offset != state.get("tg_offset", 0):
+        state["tg_offset"] = offset
+        changed = True
+
+    return changed
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "auto"
+    state = load_state()
+    changed = False
+
+    if mode == "auto":
+        # Run by GitHub Actions cron: process commands + send scheduled forecasts
+        changed |= poll_commands(state)
+        changed |= run_auto_forecasts(state)
+    elif mode == "poll":
+        # Only process Telegram commands (used for interactive testing)
+        changed |= poll_commands(state)
+    elif mode == "test":
+        # Send a quick health-check message to configured chats
+        broadcast("✅ Bot de pronósticos activo. Escribe /ayuda para ver los comandos.", state)
+    else:
+        print(f"Unknown mode: {mode}. Use: auto | poll | test")
+        sys.exit(1)
+
+    if changed:
+        save_state(state)
+        print("[INFO] State saved.")
+    else:
+        print("[INFO] No changes.")
+
+
+if __name__ == "__main__":
+    main()
