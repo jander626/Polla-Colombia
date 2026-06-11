@@ -166,15 +166,18 @@ Por favor:
 3. Revisa el historial de enfrentamientos directos recientes.
 4. Considera el contexto (qué necesita cada equipo según su posición en el grupo / fase del torneo).
 
-Basado en todo lo anterior, proporciona:
+Responde EXACTAMENTE con este formato, sin preámbulo, sin introducción, sin disclaimers — empieza directamente con la primera línea:
 
-🎯 **RESULTADO MÁS PROBABLE**: [1 (local) / X (empate) / 2 (visitante)]
-⚽ **MARCADOR PROBABLE**: X-X
-📊 **CONFIANZA**: XX%
-🔑 **FACTORES CLAVE** (3 bullets máximo)
-📝 **RESUMEN**: 2-3 oraciones explicando el pronóstico
+🎯 *RESULTADO MÁS PROBABLE*: [1 (gana {home}) / X (empate) / 2 (gana {away})]
+⚽ *MARCADOR PROBABLE*: X-X
+📊 *CONFIANZA*: XX%
+🔑 *FACTORES CLAVE*:
+• [factor 1]
+• [factor 2]
+• [factor 3]
+📝 *RESUMEN*: [2-3 oraciones explicando el pronóstico]
 
-Sé conciso y directo. Formato limpio para Telegram."""
+Máximo 200 palabras en total. Usa un solo asterisco para negritas (formato Telegram), nunca dobles asteriscos."""
 
 
 def analyze_match(match: dict, standings: list) -> Optional[str]:
@@ -188,10 +191,11 @@ def analyze_match(match: dict, standings: list) -> Optional[str]:
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
-                max_output_tokens=1024,
+                max_output_tokens=8192,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=1024),
             ),
         )
-        return response.text
+        return _clean_analysis(response.text)
     except Exception as e:
         print(f"[ERROR] Gemini API (with search): {e}")
         # Fallback without search
@@ -199,25 +203,57 @@ def analyze_match(match: dict, standings: list) -> Optional[str]:
             response = _gemini.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=8192,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=1024),
+                ),
             )
-            return response.text
+            return _clean_analysis(response.text)
         except Exception as e2:
             print(f"[ERROR] Gemini API fallback: {e2}")
             return None
 
 
+def _clean_analysis(text: Optional[str]) -> Optional[str]:
+    """Adapt model output to Telegram's legacy Markdown: ** (bold) and __
+    are not supported and make sendMessage reject the whole message."""
+    if not text:
+        return None
+    return text.replace("**", "*").replace("__", "_").strip()
+
+
 # ── Telegram helpers ──────────────────────────────────────────────────────────
+
+TELEGRAM_MAX_LEN = 4000  # actual limit is 4096; leave margin
+
 
 def tg_send(chat_id: str, text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    try:
-        resp = requests.post(url, json=payload, timeout=15)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"[ERROR] Telegram send: {e}")
-        return False
+    # Split long messages (Telegram rejects anything over 4096 chars)
+    chunks = []
+    while len(text) > TELEGRAM_MAX_LEN:
+        cut = text.rfind("\n", 0, TELEGRAM_MAX_LEN)
+        if cut <= 0:
+            cut = TELEGRAM_MAX_LEN
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    chunks.append(text)
+
+    ok = True
+    for chunk in chunks:
+        try:
+            resp = requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}, timeout=15)
+            if resp.status_code != 200:
+                # Markdown parse errors reject the whole message — resend as plain text
+                print(f"[WARN] Telegram rejected Markdown ({resp.status_code}): {resp.text[:150]} — retrying plain")
+                resp = requests.post(url, json={"chat_id": chat_id, "text": chunk}, timeout=15)
+            if resp.status_code != 200:
+                print(f"[ERROR] Telegram send failed ({resp.status_code}): {resp.text[:150]}")
+                ok = False
+        except Exception as e:
+            print(f"[ERROR] Telegram send: {e}")
+            ok = False
+    return ok
 
 
 def tg_get_updates(offset: int = 0) -> list:
@@ -232,13 +268,17 @@ def tg_get_updates(offset: int = 0) -> list:
     return []
 
 
-def broadcast(text: str, state: dict) -> None:
-    """Send a message to all known chat IDs."""
+def broadcast(text: str, state: dict) -> bool:
+    """Send a message to all known chat IDs. Returns True if at least one
+    delivery succeeded."""
     chat_ids = set(state.get("chat_ids", []))
     if CHAT_ID:
         chat_ids.add(CHAT_ID)
+    delivered = False
     for cid in chat_ids:
-        tg_send(str(cid), text)
+        if tg_send(str(cid), text):
+            delivered = True
+    return delivered
 
 
 def format_forecast_message(match: dict, analysis: str) -> str:
@@ -357,7 +397,9 @@ def run_auto_forecasts(state: dict) -> bool:
             continue
 
         msg = format_forecast_message(match, analysis)
-        broadcast(msg, state)
+        if not broadcast(msg, state):
+            print(f"[WARN] Delivery failed for {name}; will retry next run")
+            continue
 
         state.setdefault("sent_forecasts", []).append(match_id)
         changed = True
