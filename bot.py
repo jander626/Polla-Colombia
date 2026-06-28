@@ -97,9 +97,18 @@ def stage_label(match: dict) -> str:
     return f"{stage} — {group}" if group else stage
 
 
+def teams_known(match: dict) -> bool:
+    """False for knockout-stage placeholder matches where football-data.org
+    hasn't resolved the qualifying teams yet (homeTeam/awayTeam keys exist
+    but their "name" value is null)."""
+    home = (match.get("homeTeam") or {}).get("name")
+    away = (match.get("awayTeam") or {}).get("name")
+    return bool(home) and bool(away)
+
+
 def match_display_name(match: dict) -> str:
-    home = match.get("homeTeam", {}).get("name", "?")
-    away = match.get("awayTeam", {}).get("name", "?")
+    home = (match.get("homeTeam") or {}).get("name") or "Por definir"
+    away = (match.get("awayTeam") or {}).get("name") or "Por definir"
     return f"{home} vs {away}"
 
 
@@ -134,8 +143,8 @@ def all_upcoming_matches(limit: int = 10) -> list:
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 def build_analysis_prompt(match: dict, standings: list) -> str:
-    home = match.get("homeTeam", {}).get("name", "TBD")
-    away = match.get("awayTeam", {}).get("name", "TBD")
+    home = (match.get("homeTeam") or {}).get("name") or "Por definir"
+    away = (match.get("awayTeam") or {}).get("name") or "Por definir"
     stage = match.get("stage", "")
     group = match.get("group", "")
     ko = match_kickoff_utc(match)
@@ -282,8 +291,8 @@ def broadcast(text: str, state: dict) -> bool:
 
 
 def format_forecast_message(match: dict, analysis: str) -> str:
-    home = match.get("homeTeam", {}).get("name", "?")
-    away = match.get("awayTeam", {}).get("name", "?")
+    home = (match.get("homeTeam") or {}).get("name") or "Por definir"
+    away = (match.get("awayTeam") or {}).get("name") or "Por definir"
     ko = match_kickoff_utc(match)
     ko_str = ko.strftime("%d/%m/%Y %H:%M UTC") if ko else "?"
 
@@ -385,6 +394,10 @@ def run_auto_forecasts(state: dict) -> bool:
 
         if match_id in state.get("sent_forecasts", []):
             continue  # already sent
+
+        if not teams_known(match):
+            print(f"[INFO] Skipping {match_id}: qualifying teams not yet confirmed")
+            continue  # don't mark as sent — retry once football-data.org resolves the bracket
 
         name = match_display_name(match)
         print(f"[INFO] Sending forecast for {name} (kickoff in {hours_to_ko:.1f}h)")
