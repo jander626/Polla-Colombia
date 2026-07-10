@@ -30,7 +30,7 @@ WORLD_CUP_ID = "WC"  # football-data.org competition code for World Cup
 WC2026_SEASON = 2026
 
 STATE_FILE = "state.json"
-FORECAST_WINDOW_HOURS = 24   # send forecast this many hours before kickoff
+FORECAST_WINDOW_HOURS = 36   # send forecast this many hours before kickoff
 FORECAST_REPEAT_HOURS = 2    # re-send if match is within this window and no forecast yet
 
 HEADERS = {"X-Auth-Token": FOOTBALL_API_KEY}
@@ -142,6 +142,9 @@ def all_upcoming_matches(limit: int = 10) -> list:
 
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
+KNOCKOUT_STAGES = {"LAST_32", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "THIRD_PLACE", "FINAL"}
+
+
 def build_analysis_prompt(match: dict, standings: list) -> str:
     home = (match.get("homeTeam") or {}).get("name") or "Por definir"
     away = (match.get("awayTeam") or {}).get("name") or "Por definir"
@@ -149,6 +152,7 @@ def build_analysis_prompt(match: dict, standings: list) -> str:
     group = match.get("group", "")
     ko = match_kickoff_utc(match)
     ko_str = ko.strftime("%Y-%m-%d %H:%M UTC") if ko else "?"
+    is_knockout = stage in KNOCKOUT_STAGES
 
     standings_text = ""
     if standings:
@@ -161,66 +165,93 @@ def build_analysis_prompt(match: dict, standings: list) -> str:
             if lines:
                 standings_text += f"\nGrupo {grp}:\n" + "\n".join(lines)
 
-    return f"""Eres un experto analista de fútbol. Analiza el siguiente partido del Mundial 2026 y proporciona un pronóstico detallado.
+    if is_knockout:
+        elimination_note = f"""
+⚠️ PARTIDO DE ELIMINACIÓN DIRECTA: No hay empate posible al final del tiempo reglamentario.
+Si el marcador es 0-0 o igual al cabo de 90 minutos, habrá prórroga (2×15 min) y posiblemente
+tanda de penales. Considera el historial en penales de ambos equipos como factor adicional.
+En el pronóstico, usa solo 1 (gana {home}) o 2 (gana {away}) — no uses X."""
+        extra_instructions = """
+5. Evalúa la presión y experiencia en partidos de eliminatoria (¿han llegado lejos antes?).
+6. Considera el historial en tandas de penales de cada equipo si es relevante.
+7. Analiza el estado anímico y quién llega con más momentum después de la fase de grupos."""
+    else:
+        elimination_note = ""
+        extra_instructions = ""
 
+    result_options = f"1 (gana {home}) / 2 (gana {away})" if is_knockout else f"1 (gana {home}) / X (empate) / 2 (gana {away})"
+
+    return f"""Eres un experto analista de fútbol con acceso a información actualizada. Analiza este partido del Mundial 2026 con la máxima profundidad posible.
+{elimination_note}
 PARTIDO: {home} vs {away}
-FASE: {stage} {group}
+FASE: {stage_label(match)}
 FECHA: {ko_str}
 
-CLASIFICACIÓN ACTUAL:{standings_text if standings_text else ' No disponible'}
+CLASIFICACIÓN DE GRUPOS:{standings_text if standings_text else ' No disponible (fase eliminatoria)'}
 
 Por favor:
-1. Busca noticias recientes (últimas 72 horas) sobre ambos equipos: lesiones, sanciones, forma reciente, declaraciones del técnico.
-2. Analiza estadísticas de los últimos 5 partidos de cada equipo.
-3. Revisa el historial de enfrentamientos directos recientes.
-4. Considera el contexto (qué necesita cada equipo según su posición en el grupo / fase del torneo).
+1. Busca noticias recientes (últimas 48-72 horas): lesiones, sanciones, convocatoria, declaraciones del técnico.
+2. Analiza la forma reciente: últimos 5 partidos de cada equipo (resultados, goles, rendimiento defensivo).
+3. Revisa el historial directo reciente entre ambos equipos.
+4. Considera el contexto táctico: estilos de juego, formaciones probables, ventajas/desventajas.{extra_instructions}
 
-Responde EXACTAMENTE con este formato, sin preámbulo, sin introducción, sin disclaimers — empieza directamente con la primera línea:
+Responde EXACTAMENTE con este formato — empieza directamente con la primera línea, sin introducción:
 
-🎯 *RESULTADO MÁS PROBABLE*: [1 (gana {home}) / X (empate) / 2 (gana {away})]
+🎯 *RESULTADO MÁS PROBABLE*: [{result_options}]
 ⚽ *MARCADOR PROBABLE*: X-X
 📊 *CONFIANZA*: XX%
 🔑 *FACTORES CLAVE*:
 • [factor 1]
 • [factor 2]
 • [factor 3]
-📝 *RESUMEN*: [2-3 oraciones explicando el pronóstico]
+• [factor 4]
+📝 *ANÁLISIS*: [3-4 oraciones con razonamiento detallado del pronóstico]
 
-Máximo 200 palabras en total. Usa un solo asterisco para negritas (formato Telegram), nunca dobles asteriscos."""
+Máximo 250 palabras. Usa un solo asterisco para negritas (formato Telegram), nunca dobles asteriscos."""
+
+
+def _gemini_call(model: str, prompt: str, with_search: bool) -> Optional[str]:
+    """Single Gemini call with up to 3 retries on transient errors (503, 429)."""
+    config = genai_types.GenerateContentConfig(
+        tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())] if with_search else [],
+        max_output_tokens=8192,
+        thinking_config=genai_types.ThinkingConfig(thinking_budget=2048),
+    )
+    for attempt in range(3):
+        try:
+            resp = _gemini.models.generate_content(model=model, contents=prompt, config=config)
+            return _clean_analysis(resp.text)
+        except Exception as e:
+            err = str(e)
+            is_transient = "503" in err or "429" in err or "high demand" in err.lower() or "overloaded" in err.lower()
+            if is_transient and attempt < 2:
+                wait = 20 * (attempt + 1)
+                print(f"[WARN] {model} transient error (attempt {attempt+1}/3), retrying in {wait}s: {err[:120]}")
+                time.sleep(wait)
+            else:
+                print(f"[ERROR] {model} failed: {err[:200]}")
+                return None
+    return None
 
 
 def analyze_match(match: dict, standings: list) -> Optional[str]:
-    """Returns the analysis text, or None if the Gemini API call failed
-    (so callers can retry on the next run instead of marking it as sent)."""
+    """Returns the analysis text, or None if all API attempts failed."""
     prompt = build_analysis_prompt(match, standings)
 
-    try:
-        response = _gemini.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
-                max_output_tokens=8192,
-                thinking_config=genai_types.ThinkingConfig(thinking_budget=1024),
-            ),
-        )
-        return _clean_analysis(response.text)
-    except Exception as e:
-        print(f"[ERROR] Gemini API (with search): {e}")
-        # Fallback without search
-        try:
-            response = _gemini.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    max_output_tokens=8192,
-                    thinking_config=genai_types.ThinkingConfig(thinking_budget=1024),
-                ),
-            )
-            return _clean_analysis(response.text)
-        except Exception as e2:
-            print(f"[ERROR] Gemini API fallback: {e2}")
-            return None
+    # Try best model with search grounding first
+    for model in ("gemini-2.5-pro", "gemini-2.5-flash"):
+        result = _gemini_call(model, prompt, with_search=True)
+        if result:
+            print(f"[INFO] Analysis generated with {model} + search")
+            return result
+        # Try same model without search before degrading
+        result = _gemini_call(model, prompt, with_search=False)
+        if result:
+            print(f"[INFO] Analysis generated with {model} (no search)")
+            return result
+
+    print("[ERROR] All Gemini models and fallbacks exhausted")
+    return None
 
 
 def _clean_analysis(text: Optional[str]) -> Optional[str]:
