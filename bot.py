@@ -167,19 +167,19 @@ def build_analysis_prompt(match: dict, standings: list) -> str:
 
     if is_knockout:
         elimination_note = f"""
-⚠️ PARTIDO DE ELIMINACIÓN DIRECTA: No hay empate posible al final del tiempo reglamentario.
-Si el marcador es 0-0 o igual al cabo de 90 minutos, habrá prórroga (2×15 min) y posiblemente
-tanda de penales. Considera el historial en penales de ambos equipos como factor adicional.
-En el pronóstico, usa solo 1 (gana {home}) o 2 (gana {away}) — no uses X."""
+⚠️ CONTEXTO DE ELIMINATORIA: El pronóstico es para los 90 minutos reglamentarios.
+Un empate en los 90 min es posible (prórroga y penales resolverían la eliminatoria después,
+pero eso no afecta el pronóstico). Considera momentum, experiencia bajo presión y quién llega
+con mayor solidez defensiva."""
         extra_instructions = """
-5. Evalúa la presión y experiencia en partidos de eliminatoria (¿han llegado lejos antes?).
-6. Considera el historial en tandas de penales de cada equipo si es relevante.
-7. Analiza el estado anímico y quién llega con más momentum después de la fase de grupos."""
+5. Evalúa la experiencia en partidos de alta presión y eliminatorias previas.
+6. Analiza el estado físico y anímico: quién llega más fresco y con más confianza.
+7. Considera el estilo de juego y si algún equipo favorece la especulación o el ataque."""
     else:
         elimination_note = ""
         extra_instructions = ""
 
-    result_options = f"1 (gana {home}) / 2 (gana {away})" if is_knockout else f"1 (gana {home}) / X (empate) / 2 (gana {away})"
+    result_options = f"1 (gana {home}) / X (empate) / 2 (gana {away})"
 
     return f"""Eres un experto analista de fútbol con acceso a información actualizada. Analiza este partido del Mundial 2026 con la máxima profundidad posible.
 {elimination_note}
