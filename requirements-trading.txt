@@ -1,0 +1,7 @@
+# Dependencias del bot de señales de trading (paquete trading/).
+# Separadas de requirements.txt a propósito: el bot del Mundial corre cada 5
+# minutos y no debe pagar el coste de instalar pandas, numpy y yfinance.
+-r requirements.txt
+pandas>=2.0.0
+numpy>=1.24.0
+yfinance>=0.2.40

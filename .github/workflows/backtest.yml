@@ -37,7 +37,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-trading.txt
 
       # El plan gratuito de Twelve Data da 800 llamadas al día y cada corrida
       # gasta ~141. Cachear las velas permite reajustar parámetros varias veces

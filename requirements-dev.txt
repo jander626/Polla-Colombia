@@ -1,2 +1,2 @@
--r requirements.txt
+-r requirements-trading.txt
 pytest>=8.0.0

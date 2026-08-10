@@ -1,5 +1,7 @@
+# Dependencias del bot del Mundial (bot.py).
+# Este archivo lo instala forecast.yml CADA 5 MINUTOS, así que se mantiene
+# deliberadamente mínimo: las dependencias del bot de trading van aparte, en
+# requirements-trading.txt, para no cargar 288 instalaciones diarias de pandas
+# y numpy a un bot que no los usa.
 google-genai>=1.0.0
 requests>=2.31.0
-pandas>=2.0.0
-numpy>=1.24.0
-yfinance>=0.2.40
