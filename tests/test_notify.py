@@ -45,7 +45,16 @@ def make_signal(symbol: str = "AAPL") -> Signal:
     )
 
 
-CALIBRATED = Calibration.from_results([(72.0, True)] * 40 + [(72.0, False)] * 25)
+def calibration_for(asset_class: str, wins: int, losses: int, win_r: float = 2.5):
+    data = [(asset_class, 72.0, True, win_r)] * wins + [
+        (asset_class, 72.0, False, -1.0)
+    ] * losses
+    return Calibration.from_outcomes(data)
+
+
+# Perfil realista: acierto bajo pero esperanza positiva por el pago asimétrico.
+CALIBRATED = calibration_for("stock", 193, 356)
+FOREX_CALIBRATED = calibration_for("forex", 31, 35)
 
 
 # ── Troceado ──────────────────────────────────────────────────────────────────
@@ -83,7 +92,7 @@ def test_sanitize_removes_markdown_telegram_rejects():
 # ── Alertas ───────────────────────────────────────────────────────────────────
 
 def test_signal_message_contains_the_three_prices():
-    message = format_signal(make_signal(), CALIBRATED, 61.0, True)
+    message = format_signal(make_signal(), CALIBRATED)
     assert "231.40" in message   # entrada
     assert "248.90" in message   # objetivo
     assert "224.10" in message   # stop
@@ -92,42 +101,75 @@ def test_signal_message_contains_the_three_prices():
 
 
 def test_an_uncalibrated_signal_says_so():
-    """0% sin explicación se leería como 'muy mala', no como 'no lo sé'."""
-    message = format_signal(make_signal(), Calibration.empty(), 0.0, False)
+    """Sin explicación, un porcentaje bajo se leería como 'muy mala señal'."""
+    message = format_signal(make_signal(), Calibration.empty())
     assert "sin calibrar" in message.lower()
     assert "backtest" in message.lower()
 
 
-def test_a_low_sample_signal_is_flagged():
-    message = format_signal(make_signal(), CALIBRATED, 45.0, False)
+def test_the_message_shows_win_rate_and_expectancy_together():
+    """Publicar solo el acierto engaña cuando los pagos son asimétricos.
+
+    Un 35% de acierto con esperanza positiva es un buen sistema, pero leído a
+    secas parece un mal sistema. Las dos cifras tienen que ir juntas.
+    """
+    message = format_signal(make_signal(), CALIBRATED)
+    assert "Acierto histórico" in message
+    assert "Beneficio esperado" in message
+    assert "R por operación" in message
+    assert "llegan al objetivo" in message
+
+
+def test_a_segment_without_a_proven_edge_is_flagged():
+    """Esperanza no demostrada: hay que decirlo, no esconderlo tras un %."""
+    thin = calibration_for("stock", 6, 11)
+    message = format_signal(make_signal(), thin)
+    assert "Sin ventaja demostrada" in message
+
+
+def test_a_low_sample_segment_is_flagged():
+    message = format_signal(make_signal("EUR/USD"), calibration_for("forex", 8, 9))
     assert "poco fiable" in message.lower()
 
 
-def test_a_reliable_signal_shows_a_plain_percentage():
-    message = format_signal(make_signal(), CALIBRATED, 61.0, True)
-    assert "*Confianza: 61%*" in message
+def test_a_reliable_segment_is_not_flagged_as_unreliable():
+    message = format_signal(make_signal(), CALIBRATED)
     assert "poco fiable" not in message.lower()
+
+
+def test_the_signal_uses_its_own_asset_class(monkeypatch):
+    """Una señal de forex no puede calibrarse con el histórico de acciones."""
+    both = Calibration.from_outcomes(
+        [("stock", 72.0, True, 2.5)] * 193 + [("stock", 72.0, False, -1.0)] * 356
+        + [("forex", 72.0, True, 2.5)] * 31 + [("forex", 72.0, False, -1.0)] * 35
+    )
+    stock_msg = format_signal(make_signal("AAPL"), both)
+    forex_msg = format_signal(make_signal("EUR/USD"), both)
+    assert stock_msg != forex_msg
 
 
 def test_an_unverified_signal_says_so():
     """'Sin verificar' y 'sin riesgo' son cosas muy distintas."""
-    message = format_signal(make_signal(), CALIBRATED, 61.0, True, risk=None)
+    message = format_signal(make_signal(), CALIBRATED, risk=None)
     assert "Sin verificación de noticias" in message
 
 
-def test_event_risk_is_shown_with_its_penalty():
+def test_event_risk_is_shown_and_lowers_the_win_rate():
     risk = EventRisk("low", 10.0, "Tendencia intacta.", "Dato de empleo el viernes.")
-    message = format_signal(make_signal(), CALIBRATED, 51.0, True, risk=risk)
-    assert "Tendencia intacta" in message
-    assert "empleo" in message
-    assert "10 puntos" in message
+    with_risk = format_signal(make_signal(), CALIBRATED, risk=risk)
+    without = format_signal(make_signal(), CALIBRATED)
+
+    assert "Tendencia intacta" in with_risk
+    assert "empleo" in with_risk
+    assert "10 puntos" in with_risk
+    assert with_risk != without
 
 
 def test_forex_prices_use_more_decimals():
     """1.0842 con dos decimales sería inservible para operar."""
     signal = make_signal("EUR/USD")
     object.__setattr__(signal, "levels", Levels(1.08420, 1.07850, 1.09560, 2.0, 0.0057, 0.0114))
-    message = format_signal(signal, CALIBRATED, 60.0, True)
+    message = format_signal(signal, FOREX_CALIBRATED)
     assert "1.08420" in message
     assert "PAR" in message
 
