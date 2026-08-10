@@ -1,146 +1,178 @@
-# 🌍 Bot de Pronósticos — Mundial 2026
+# Bot de señales de trading — acciones y forex
 
-Bot que analiza y pronostica partidos del Mundial 2026 usando inteligencia artificial. Corre automáticamente en GitHub Actions (sin servidor) y te notifica por Telegram **24 horas antes de cada partido**.
+Analiza el mercado una vez al día, antes de la apertura de Estados Unidos, y
+avisa por Telegram de oportunidades **solo de compra** en instrumentos
+operables en Quantfury, con precio de entrada, objetivo, stop, ratio
+riesgo/beneficio y un porcentaje de confianza calibrado.
 
----
-
-## ¿Qué hace?
-
-- ✅ Envía pronósticos automáticos 24h antes de cada partido
-- ✅ Analiza forma reciente, noticias, lesiones y estadísticas con Claude AI
-- ✅ Indica resultado más probable (local/empate/visitante), marcador y confianza
-- ✅ Maneja la fase de grupos Y las eliminatorias (los equipos que clasifiquen se toman automáticamente del API)
-- ✅ Responde comandos manuales por Telegram:
-  - `/proximos` — lista los próximos 10 partidos
-  - `/pronostico <número o equipo>` — pide el análisis de un partido específico
-  - `/ayuda` — muestra todos los comandos
-
----
-
-## Configuración (una sola vez)
-
-Necesitas configurar **3–4 secretos** en GitHub. Sigue estos pasos:
-
-### Paso 1 — Crear el bot de Telegram
-
-1. Abre Telegram y busca **@BotFather**
-2. Envía `/newbot`
-3. Pon un nombre (ej. `Mi Bot del Mundial`) y un username (ej. `mibot_mundial_bot`)
-4. BotFather te dará un **token** con formato `123456789:ABCdefGHI...` → este es tu `TELEGRAM_BOT_TOKEN`
-
-5. Abre una conversación con tu nuevo bot y envía cualquier mensaje (ej. `/start`).  
-   Después ve a: `https://api.telegram.org/bot<TU_TOKEN>/getUpdates`  
-   En el JSON, busca `"chat":{"id":...}` → ese número es tu `TELEGRAM_CHAT_ID`
-
-### Paso 2 — Obtener la API de football-data.org
-
-1. Ve a [football-data.org](https://www.football-data.org/client/register) y crea una cuenta gratuita
-2. Confirma tu email y obtén tu **API key** en el dashboard
-3. El plan gratuito incluye acceso al Mundial → `FOOTBALL_DATA_API_KEY`
-
-### Paso 3 — Obtener la API de Anthropic (Claude)
-
-1. Ve a [console.anthropic.com](https://console.anthropic.com) y crea una cuenta
-2. En *API Keys*, genera una nueva clave → `ANTHROPIC_API_KEY`
-3. Requiere agregar créditos (el Mundial completo (~104 partidos) cuesta aprox. $3–5 USD)
-
-### Paso 4 — Agregar los secretos en GitHub
-
-1. Ve a tu repositorio en GitHub
-2. Clic en **Settings** → **Secrets and variables** → **Actions**
-3. Agrega estos 4 secretos uno por uno con **New repository secret**:
-
-| Nombre del secreto | Valor |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | El token de @BotFather |
-| `TELEGRAM_CHAT_ID` | Tu chat ID de Telegram |
-| `FOOTBALL_DATA_API_KEY` | Tu API key de football-data.org |
-| `ANTHROPIC_API_KEY` | Tu API key de Anthropic |
-
-### Paso 5 — Activar GitHub Actions
-
-1. Ve a la pestaña **Actions** de tu repositorio
-2. Si aparece un aviso "Workflows disabled", clic en **Enable** para activarlos
-3. Para probar que todo funciona: clic en **World Cup Forecast Bot** → **Run workflow** → selecciona `test` como modo → **Run workflow**
-
-Si el bot está configurado correctamente, recibirás un mensaje en Telegram: ✅ *Bot de pronósticos activo.*
+> **Esto no es asesoría financiera.** Es una herramienta de cribado que evita
+> mirar 140 gráficos cada mañana. Las órdenes las colocas tú.
 
 ---
 
 ## Cómo funciona
 
-```
-Cada 30 minutos (GitHub Actions cron)
-    │
-    ├── Revisa Telegram para comandos manuales (/proximos, /pronostico, etc.)
-    │
-    └── Revisa si hay partidos en las próximas 24h
-            │
-            └── Para cada partido nuevo → Claude AI analiza con web search
-                        │
-                        └── Envía pronóstico por Telegram
-                                    │
-                                    └── Guarda en state.json para no repetir
-```
+A las **08:30 hora de Nueva York** el bot descarga velas diarias de ~141
+instrumentos (acciones líquidas de NYSE/NASDAQ, cuatro ETFs y los 14 pares de
+divisas de Quantfury), calcula indicadores y aplica seis filtros. De los que
+sobreviven se queda con los mejores, los pasa por un filtro de noticias y
+manda la alerta.
 
-### Formato del pronóstico
+**Hay días que no llega nada, y es correcto.** Un bot que encuentra
+oportunidades todos los días se las está inventando.
 
-```
-🌍 PRONÓSTICO MUNDIAL 2026
-━━━━━━━━━━━━━━━━━━━━
-⚽ Colombia vs Argentina
-📅 15/06/2026 18:00 UTC
-🏆 GROUP_STAGE Grupo B
-━━━━━━━━━━━━━━━━━━━━
+### La estrategia
 
-🎯 RESULTADO MÁS PROBABLE: 2 (visitante)
-⚽ MARCADOR PROBABLE: 1-2
-📊 CONFIANZA: 62%
-🔑 FACTORES CLAVE
-  • Argentina llega con 3 victorias consecutivas
-  • Colombia sin su mediocampista titular por lesión
-  • Historial favorece a Argentina en torneos mayores
-📝 RESUMEN: Argentina muestra mejor forma...
+Retroceso en tendencia alcista: no comprar rupturas ni adivinar suelos, sino
+esperar a que algo que ya sube se tome un descanso y entrar cuando reanuda.
+
+| Filtro | Condición |
+|---|---|
+| Régimen alcista | `Close > EMA200` y `EMA50 > EMA200` |
+| Fuerza de tendencia | `ADX(14) > 20` |
+| Retroceso real | El RSI cayó de 45 y el precio visitó la zona de la EMA20 |
+| Reanudación | RSI cruzando al alza, MACD girando o cierre sobre el máximo previo |
+| Liquidez | Volumen medio en dólares por encima del umbral |
+| Volatilidad sana | `ATR/precio` ni muerto ni caótico |
+
+Los niveles salen del ATR: la **entrada es un techo** (si abre con hueco
+alcista, la operación no se ejecuta), el **stop** se apoya en el mínimo del
+retroceso y el **objetivo** está a 3 ATR. Cualquier señal por debajo de 1.5 de
+ratio riesgo/beneficio se descarta.
+
+### El porcentaje de confianza
+
+Es la decisión de diseño central: **no lo inventa un modelo de lenguaje.**
+
+Pedirle a un LLM "dame la probabilidad de que esto funcione" devuelve un
+número plausible y ficticio, que es peor que no dar ninguno porque invita a
+confiar en él. En su lugar:
+
+1. El backtest simula la estrategia sobre años de historia.
+2. Agrupa las señales por tramo de puntuación y mide el acierto real de cada uno.
+3. Publica el **límite inferior del intervalo de Wilson**, que castiga la falta
+   de muestra: 2 aciertos de 3 no se publican como "67%".
+4. Gemini solo puede **restar** confianza por riesgo de evento. Nunca sumar.
+
+Cuando la alerta dice 64%, significa algo comprobable: *de las señales
+históricas con este perfil, el 64% alcanzó el objetivo antes que el stop.*
+
+Sin `calibration.json` las alertas salen marcadas como **sin calibrar**, y eso
+es deliberado: un bot recién instalado no ha demostrado nada.
+
+---
+
+## Puesta en marcha
+
+### 1. Secretos en GitHub
+
+`Settings → Secrets and variables → Actions`:
+
+| Secreto | Para qué | Obligatorio |
+|---|---|---|
+| `TWELVEDATA_API_KEY` | Datos de mercado ([gratis](https://twelvedata.com/pricing)) | Sí |
+| `TELEGRAM_BOT_TOKEN` | Envío de alertas (vía [@BotFather](https://t.me/BotFather)) | Sí |
+| `GEMINI_API_KEY` | Filtro de noticias ([AI Studio](https://aistudio.google.com/apikey)) | No |
+| `TELEGRAM_CHAT_ID` | Chat por defecto | No |
+
+Sin `GEMINI_API_KEY` el bot funciona igual, pero las alertas salen marcadas
+como *sin verificación de noticias*.
+
+### 2. Calibrar
+
+**Antes de fiarte de ninguna alerta**, ejecuta el backtest:
+
+`Actions → Backtest y calibración → Run workflow`
+
+Tarda unos 20 minutos (el plan gratuito limita a 8 llamadas por minuto). Al
+terminar publica el informe en el resumen del job y commitea
+`calibration.json`. Si el R medio sale negativo, el propio informe lo dice: hay
+que ajustar parámetros antes de seguir.
+
+### 3. Activar
+
+El workflow `Bot de señales de trading` corre solo de lunes a viernes. Escribe
+`/start` al bot en Telegram para registrar tu chat.
+
+---
+
+## Comandos de Telegram
+
+| Comando | Qué hace |
+|---|---|
+| `/senales` | Últimas señales cerradas |
+| `/abiertas` | Operaciones en curso |
+| `/rendimiento` | Acierto real frente a la confianza prometida |
+| `/instrumentos` | Universo vigilado |
+| `/ayuda` | Ayuda |
+
+`/rendimiento` es el control externo de la calibración. Si el acierto real
+queda sistemáticamente por debajo de lo prometido, la tabla está mal y hay que
+rehacer el backtest.
+
+---
+
+## Uso local
+
+```bash
+pip install -r requirements-dev.txt
+export TWELVEDATA_API_KEY=...
+
+python trading_bot.py backtest --years 5 --write   # calibrar
+python trading_bot.py scan --force --dry-run       # escanear sin enviar nada
+python trading_bot.py track                        # revisar operaciones abiertas
+python -m pytest tests/                            # 160 tests
 ```
 
 ---
 
-## Ejecución manual
+## Limitaciones
 
-Si quieres lanzar el bot manualmente sin esperar el cron:
+Conviene tenerlas presentes antes de poner dinero:
 
-1. Ve a **Actions** → **World Cup Forecast Bot**
-2. Clic en **Run workflow**
-3. Selecciona el modo:
-   - `auto` — modo normal (detecta partidos + procesa comandos)
-   - `poll` — solo procesa comandos de Telegram
-   - `test` — envía mensaje de prueba
-
----
-
-## Estructura del proyecto
-
-```
-├── bot.py                          # Script principal
-├── requirements.txt                # Dependencias Python
-├── state.json                      # Estado persistente (pronósticos enviados)
-└── .github/
-    └── workflows/
-        └── forecast.yml            # Workflow de GitHub Actions
-```
+- **Objetivo realista**: 45-58% de aciertos con riesgo/beneficio cercano a 2.
+  Rentable en el agregado, pero con rachas de 6-8 pérdidas seguidas que son
+  estadísticamente normales y se sienten fatal.
+- **Todo backtest sobrestima.** No captura el slippage real ni el riesgo de no
+  colocar la orden a tiempo.
+- **Sesgo de supervivencia.** El universo son los instrumentos líquidos de hoy,
+  así que el histórico sale mejor de lo que habría sido en vivo. El informe lo
+  advierte explícitamente.
+- **Quantfury no tiene API pública de trading**, así que la ejecución es manual.
+  El bot no toca tu cuenta.
 
 ---
 
-## Preguntas frecuentes
+## Arquitectura
 
-**¿Necesito un servidor?**  
-No. Todo corre en GitHub Actions de forma gratuita (hasta 2000 minutos/mes en planes free).
+```
+trading/
+  config.py       Umbrales, horarios y festivos de NYSE
+  universe.py     Instrumentos de Quantfury + filtro por volumen real
+  data.py         Proveedor intercambiable (Twelve Data → yfinance) con caché
+  indicators.py   EMA, RSI, MACD, ATR, ADX en pandas puro
+  strategy.py     Filtros y puntuación 0-100
+  risk.py         Niveles y calibración de Wilson
+  backtest.py     Simulación y generación de calibration.json
+  llm_filter.py   Riesgo de evento con Gemini (solo resta)
+  notify.py       Telegram y formato de mensajes
+  state.py        Estado y seguimiento de señales
+  schedule.py     Ventana horaria con zonas horarias reales
+```
 
-**¿Cuánto cuesta?**  
-Solo la API de Claude: aprox. $3–5 USD para el Mundial completo. El resto es gratuito.
+Dos invariantes sostienen la credibilidad del sistema, y hay tests que fallan
+si se rompen:
 
-**¿Me llega si el partido es a las 3am?**  
-Sí. El pronóstico se envía 24h antes, así que si el partido es a las 3am, lo recibirías a las 3am del día anterior (hora UTC). Puedes ajustar `FORECAST_WINDOW_HOURS` en `bot.py`.
+- **El backtest y el escaneo en vivo comparten las mismas funciones.** Si
+  divergieran, la calibración dejaría de decir nada sobre el comportamiento real.
+- **La estrategia no puede ganar dinero sobre ruido puro.** `test_null_hypothesis`
+  corre la estrategia sobre paseos aleatorios sin deriva y exige que la
+  esperanza no sea significativamente positiva. Un backtest con look-ahead
+  aprobaría cualquier estrategia; este test lo detecta.
 
-**¿Qué pasa con los partidos de eliminatoria que aún no tienen equipos definidos?**  
-La API de football-data.org actualiza automáticamente los equipos cuando se conocen, y el bot los recogerá en el siguiente ciclo.
+---
+
+Este repositorio alojaba antes un bot de pronósticos del Mundial 2026. Se
+retiró al dejar de necesitarse; su capa de Telegram —troceado de mensajes y
+reintento en texto plano cuando el Markdown falla— sobrevive en `notify.py`.
+Sigue disponible en el historial de git.

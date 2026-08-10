@@ -1,0 +1,35 @@
+name: Tests
+
+# El repositorio no tenía integración continua: su único workflow era el propio
+# bot en ejecución. Estos tests protegen invariantes que, si se rompen en
+# silencio, no fallan de forma visible — simplemente hacen que el bot mienta:
+# la causalidad de los indicadores y la ausencia de ventaja sobre ruido puro.
+on:
+  push:
+    paths:
+      - "trading/**"
+      - "tests/**"
+      - "trading_bot.py"
+      - "requirements*.txt"
+      - ".github/workflows/tests.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short

@@ -1,0 +1,89 @@
+name: Bot de señales de trading
+
+on:
+  # El cron dispara a menudo dentro de una ventana amplia; quien decide si
+  # toca escanear es trading/schedule.py, con zonas horarias reales. El cron
+  # de Actions se retrasa bajo carga y además es UTC, así que las 08:30 de
+  # Nueva York se mueven una hora con el horario de verano. Delegar la
+  # decisión en Python resuelve las dos cosas.
+  #
+  # 11:00–14:00 UTC cubre las 08:30 de Nueva York tanto en horario de verano
+  # (12:30 UTC) como de invierno (13:30 UTC), con margen para los retrasos.
+  schedule:
+    - cron: "*/15 11-14 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "auto / scan / track / poll / test"
+        required: false
+        default: "auto"
+      force:
+        description: "Ignorar la ventana horaria (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write  # para commitear trading_state.json
+
+# Dos ejecuciones simultáneas commitearían el estado a la vez y una perdería.
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Cada escaneo gasta ~141 de las 800 llamadas diarias del plan gratuito.
+      # La caché evita volver a descargar el histórico completo en cada
+      # ejecución: solo hacen falta las velas nuevas.
+      - name: Restore market data cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/market_data
+          key: market-data-${{ github.run_id }}
+          restore-keys: |
+            market-data-
+
+      - name: Run bot
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODE: ${{ github.event.inputs.mode || 'auto' }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          args=("$MODE")
+          if [ "$FORCE" = "true" ] && { [ "$MODE" = "auto" ] || [ "$MODE" = "scan" ]; }; then
+            args+=(--force)
+          fi
+          python trading_bot.py "${args[@]}"
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name  "trading-bot[bot]"
+          git config user.email "trading-bot@users.noreply.github.com"
+          git add trading_state.json
+          if git diff --cached --quiet; then
+            echo "El estado no cambió."
+            exit 0
+          fi
+          git commit -m "chore: actualizar estado del bot [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "${{ github.ref_name }}"

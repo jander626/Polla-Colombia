@@ -1,0 +1,8 @@
+# Caché de datos de mercado: se regenera sola y pesa demasiado para el repo.
+.cache/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
