@@ -219,3 +219,52 @@ def test_performance_compares_promise_against_reality():
 
 def test_help_warns_it_is_not_financial_advice():
     assert "asesoría financiera" in format_help()
+
+
+# ── Fallos encontrados en la primera alerta real ──────────────────────────────
+
+def test_a_tiny_edge_is_not_announced_as_a_winner():
+    """El fallo de la primera alerta real: '+0.00R' y 'gana en el agregado'.
+
+    Una esperanza de +0.005R es positiva y económicamente nada. Con dos
+    decimales se imprimía como +0.00R mientras el texto afirmaba que ganaba.
+    Ahora debe reconocerse como insuficiente.
+    """
+    # Reproduce el caso real: media +0.160R, mínimo +0.028R. Positivo, pero
+    # por debajo de lo que hace falta para que la operación valga la pena.
+    tiny = calibration_for("stock", 193, 356, win_r=2.3)
+    stats = tiny.for_asset_class("stock")
+    assert stats is not None
+    assert 0 < stats.expectancy_lower < 0.05     # positiva pero minúscula
+    assert not stats.has_edge
+
+    message = format_signal(make_signal(), tiny)
+    assert "demasiado pequeña" in message
+    assert "Gana en el agregado" not in message
+
+
+def test_expectancy_is_shown_with_enough_precision():
+    """Con dos decimales, una ventaja pequeña se imprimía como '+0.00R'."""
+    message = format_signal(make_signal(), calibration_for("stock", 193, 356, win_r=2.3))
+    assert "+0.00R" not in message      # el formato viejo, ambiguo
+    assert "R por operación" in message
+
+
+def test_a_real_edge_is_still_announced_as_such():
+    """El umbral no puede silenciar una ventaja que sí es útil."""
+    message = format_signal(make_signal(), CALIBRATED)
+    assert "Gana en el agregado" in message
+    assert "demasiado pequeña" not in message
+
+
+def test_a_stale_calibration_is_announced():
+    """Calibrar, cambiar la estrategia y seguir publicando las cifras viejas.
+
+    Pasó de verdad: se calibró a las 04:07, la estrategia cambió a las 04:24, y
+    el bot siguió mostrando la confianza de la versión anterior sin avisar.
+    """
+    fresh = format_signal(make_signal(), CALIBRATED, stale_calibration=False)
+    stale = format_signal(make_signal(), CALIBRATED, stale_calibration=True)
+
+    assert "versión anterior" in stale
+    assert "versión anterior" not in fresh

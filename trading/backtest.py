@@ -259,8 +259,12 @@ class BacktestReport:
             if np.isfinite(t.r_multiple)
         ]
 
-    def to_calibration(self) -> Calibration:
-        return Calibration.from_outcomes(self.outcomes(), notes=" | ".join(self.notes))
+    def to_calibration(self, params: StrategyParams | None = None) -> Calibration:
+        return Calibration.from_outcomes(
+            self.outcomes(),
+            notes=" | ".join(self.notes),
+            signature=params.signature if params is not None else "",
+        )
 
     def component_diagnostics(self, quantiles: int = 4) -> str:
         """Mide si cada componente de la puntuación predice el resultado.
