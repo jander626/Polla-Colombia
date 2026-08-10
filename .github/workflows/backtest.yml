@@ -1,0 +1,104 @@
+name: Backtest y calibración
+
+# Se lanza a mano: es la puerta de decisión de la fase 2, no una tarea
+# periódica. Aquí se mide si la estrategia tiene ventaja y se genera la tabla
+# de calibración que da sentido al porcentaje de confianza.
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Años de histórico a simular"
+        required: false
+        default: "5"
+      write:
+        description: "Guardar calibration.json en la rama (true/false)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write  # para commitear calibration.json
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    # 141 instrumentos a 8 llamadas/minuto son ~20 minutos solo de descarga.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # El plan gratuito de Twelve Data da 800 llamadas al día y cada corrida
+      # gasta ~141. Cachear las velas permite reajustar parámetros varias veces
+      # sin agotar la cuota; la clave incluye la fecha para refrescar a diario.
+      - name: Restore market data cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/market_data
+          key: market-data-${{ github.run_id }}
+          restore-keys: |
+            market-data-
+
+      - name: Run backtest
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          YEARS: ${{ github.event.inputs.years || '5' }}
+          WRITE: ${{ github.event.inputs.write || 'true' }}
+        run: |
+          set -o pipefail
+          args=(backtest --years "$YEARS")
+          [ "$WRITE" = "false" ] || args+=(--write)
+          python trading_bot.py "${args[@]}" 2>&1 | tee backtest_output.txt
+
+      # El informe se publica en el resumen del job para poder leerlo sin
+      # rebuscar en los logs: es el documento sobre el que se decide si la
+      # estrategia sigue adelante.
+      - name: Publish report
+        if: always()
+        run: |
+          {
+            echo "## Resultado del backtest"
+            echo ""
+            echo '```'
+            grep -v '^\[INFO\] Datos descargados' backtest_output.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report
+          path: backtest_output.txt
+          retention-days: 30
+
+      - name: Commit calibration
+        if: github.event.inputs.write != 'false'
+        run: |
+          if [ ! -f calibration.json ]; then
+            echo "No se generó calibration.json (el backtest no llegó a completarse)."
+            exit 0
+          fi
+          git config user.name  "trading-bot[bot]"
+          git config user.email "trading-bot@users.noreply.github.com"
+          git add calibration.json
+          if git diff --cached --quiet; then
+            echo "La calibración no cambió."
+            exit 0
+          fi
+          git commit -m "chore: actualizar calibración del backtest [skip ci]"
+          # El bot del Mundial commitea en esta misma rama cada 5 minutos;
+          # sin rebase las dos escrituras chocan.
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "${{ github.ref_name }}"
