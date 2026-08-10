@@ -76,6 +76,7 @@ def _deliver_signals(
     params: StrategyParams,
     dry_run: bool,
     use_llm: bool,
+    stale_calibration: bool = False,
 ) -> int:
     """Verifica, formatea y envía. Devuelve cuántas señales se entregaron."""
     # No se repite una señal sobre un instrumento que ya tiene operación
@@ -99,7 +100,7 @@ def _deliver_signals(
                 continue
             confidence = apply_llm_penalty(confidence, risk.penalty, MAX_LLM_PENALTY)
 
-        message = notify.format_signal(signal, calibration, risk)
+        message = notify.format_signal(signal, calibration, risk, stale_calibration)
 
         if dry_run:
             print(message)
@@ -144,10 +145,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     signals = scan_universe(liquid, bars, params, benchmark)
     calibration = Calibration.load(CALIBRATION_FILE)
+    stale = calibration.is_calibrated and not calibration.matches(params)
     if not calibration.is_calibrated:
         print(
             "[WARN] Sin calibration.json: las alertas saldrán marcadas como "
             "'sin calibrar'. Ejecuta el backtest."
+        )
+    elif stale:
+        # Ocurrió de verdad: se calibró, se cambió la estrategia, y el bot
+        # siguió publicando la confianza de la versión anterior en silencio.
+        print(
+            "[WARN] La calibración es de otra versión de la estrategia "
+            f"(guardada {calibration.generated_at}). Las alertas lo indicarán. "
+            "Vuelve a ejecutar el backtest."
         )
 
     if not signals:
@@ -167,7 +177,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     delivered = _deliver_signals(
         signals, state, calibration, client, params,
-        dry_run=args.dry_run, use_llm=not args.no_llm,
+        dry_run=args.dry_run, use_llm=not args.no_llm, stale_calibration=stale,
     )
     print(f"[INFO] Señales entregadas: {delivered}")
 
@@ -352,7 +362,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     print()
     print(report.component_diagnostics())
 
-    calibration = report.to_calibration()
+    calibration = report.to_calibration(params)
     print()
     print("── Calibración de confianza ───────────────────────────")
     print(calibration.summary_table())

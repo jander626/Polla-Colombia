@@ -343,3 +343,65 @@ def test_llm_penalty_is_capped():
 
 def test_confidence_never_goes_negative():
     assert apply_llm_penalty(5.0, 25.0, MAX_LLM_PENALTY) == 0.0
+
+
+# ── Firma de la estrategia ────────────────────────────────────────────────────
+
+def test_a_calibration_knows_which_strategy_produced_it():
+    calibration = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 40, 60), signature=DEFAULT_PARAMS.signature
+    )
+    assert calibration.matches(DEFAULT_PARAMS)
+
+
+def test_a_calibration_from_another_strategy_is_rejected():
+    """Su acierto describe operaciones que esta estrategia ya no genera."""
+    calibration = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 40, 60), signature=DEFAULT_PARAMS.signature
+    )
+    other = replace(DEFAULT_PARAMS, adx_min=30.0)
+    assert not calibration.matches(other)
+
+
+def test_a_calibration_without_signature_never_matches():
+    """Las calibraciones anteriores a esta comprobación no pueden validarse."""
+    assert not Calibration.from_outcomes(outcomes("stock", 55.0, 40, 60)).matches(
+        DEFAULT_PARAMS
+    )
+
+
+def test_the_signature_survives_a_round_trip(tmp_path):
+    path = tmp_path / "calibration.json"
+    Calibration.from_outcomes(
+        outcomes("stock", 55.0, 40, 60), signature=DEFAULT_PARAMS.signature
+    ).save(str(path))
+    assert Calibration.load(str(path)).matches(DEFAULT_PARAMS)
+
+
+def test_cosmetic_changes_do_not_change_the_signature():
+    """Solo debe cambiar con lo que altera qué señales se generan."""
+    same = replace(DEFAULT_PARAMS, max_signals_per_scan=99)
+    assert same.signature == DEFAULT_PARAMS.signature
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"adx_min": 25.0}, {"target_atr_mult": 4.0}, {"use_market_regime_filter": False},
+     {"min_risk_reward": 2.0}, {"resume_rsi_min": 55.0}],
+)
+def test_meaningful_changes_change_the_signature(change):
+    assert replace(DEFAULT_PARAMS, **change).signature != DEFAULT_PARAMS.signature
+
+
+def test_a_thin_edge_is_not_counted_as_an_edge():
+    """Una ventaja positiva pero minúscula no es una ventaja utilizable.
+
+    El caso real medido: media +0.130R con mínimo +0.005R en acciones. Aquí se
+    reproduce con mínimo +0.028R — positivo, y aun así insuficiente.
+    """
+    stats = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 193, 356, win_r=2.3)
+    ).for_asset_class("stock")
+    assert stats is not None
+    assert stats.expectancy_lower > 0
+    assert not stats.has_edge

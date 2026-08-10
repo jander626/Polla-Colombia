@@ -121,7 +121,11 @@ def _fmt(value: float, instrument: Instrument) -> str:
     return f"{value:.{instrument.price_decimals}f}"
 
 
-def _confidence_block(stats: Optional[OutcomeStats], penalty: float = 0.0) -> str:
+def _confidence_block(
+    stats: Optional[OutcomeStats],
+    penalty: float = 0.0,
+    stale: bool = False,
+) -> str:
     """Bloque de confianza: acierto histórico Y beneficio esperado.
 
     Publicar solo el acierto engañaba. Este sistema acierta alrededor del 35% de
@@ -142,20 +146,33 @@ def _confidence_block(stats: Optional[OutcomeStats], penalty: float = 0.0) -> st
 
     lines = [
         f"📊 *Acierto histórico: {win_rate:.0f}%*",
-        f"💰 *Beneficio esperado: {expectancy:+.2f}R por operación*",
+        # Tres decimales, no dos: con dos, una ventaja de +0.005R se imprimía
+        # como "+0.00R" mientras el texto afirmaba que la señal ganaba.
+        f"💰 *Beneficio esperado: {expectancy:+.3f}R por operación*",
     ]
 
-    if expectancy > 0:
+    if stats.has_edge:
         lines.append(
             f"     _De cada 100 señales así, ~{win_rate:.0f} llegan al objetivo._\n"
             "     _Gana en el agregado porque el objetivo está más lejos que el stop._"
         )
+    elif expectancy > 0:
+        # Positiva pero demasiado pequeña para servir de algo: se la come el
+        # primer slippage. Decirlo es más útil que redondearla a cero y callar.
+        lines.append(
+            "     ⚠️ _Ventaja demasiado pequeña para ser útil: la absorbería el\n"
+            "     coste de operar. Trátala como informativa._"
+        )
     else:
-        # Esperanza no positiva: la señal no ha demostrado ventaja y hay que
-        # decirlo con todas las letras, no esconderlo tras un porcentaje.
         lines.append(
             "     ⚠️ _Sin ventaja demostrada en el histórico para esta clase de\n"
             "     activo. Trátala como informativa, no como recomendación._"
+        )
+
+    if stale:
+        lines.append(
+            "     🔄 _Calibración de una versión anterior de la estrategia:\n"
+            "     estas cifras no describen esta señal. Vuelve a calibrar._"
         )
 
     if not stats.is_reliable:
@@ -172,6 +189,7 @@ def format_signal(
     signal: Signal,
     calibration: Calibration,
     risk: Optional[EventRisk] = None,
+    stale_calibration: bool = False,
 ) -> str:
     """Mensaje de alerta de compra.
 
@@ -195,6 +213,7 @@ def format_signal(
         _confidence_block(
             calibration.for_asset_class(signal.asset_class),
             penalty=risk.penalty if risk is not None else 0.0,
+            stale=stale_calibration,
         ),
     ]
 

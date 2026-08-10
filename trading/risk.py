@@ -28,7 +28,12 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .config import MIN_BUCKET_SAMPLES, SCORE_BUCKETS, StrategyParams
+from .config import (
+    MIN_BUCKET_SAMPLES,
+    MIN_MEANINGFUL_EXPECTANCY,
+    SCORE_BUCKETS,
+    StrategyParams,
+)
 
 
 # ── Estadística ───────────────────────────────────────────────────────────────
@@ -188,12 +193,18 @@ class OutcomeStats:
 
     @property
     def has_edge(self) -> bool:
-        """Ventaja que sobrevive a su propia incertidumbre.
+        """Ventaja demostrada Y económicamente útil.
 
-        Una esperanza positiva cuyo límite inferior es negativo no es una
-        ventaja demostrada: es ruido que casualmente salió a favor.
+        Dos condiciones, y ambas hacen falta:
+
+        1. Que el límite inferior sea positivo. Una media favorable cuyo
+           intervalo cruza el cero es ruido que salió a favor.
+        2. Que además sea lo bastante grande para servir de algo. Una ventaja
+           de +0.005R es positiva y no significa nada: se la come el primer
+           slippage. Exigir solo lo primero producía alertas que anunciaban
+           "+0.00R" y a la vez afirmaban que ganaban.
         """
-        return self.expectancy_lower > 0.0
+        return self.expectancy_lower >= MIN_MEANINGFUL_EXPECTANCY
 
     def to_dict(self) -> dict:
         return {
@@ -235,10 +246,22 @@ class Calibration:
     generated_at: str = ""
     total_signals: int = 0
     notes: str = ""
+    strategy_signature: str = ""
 
     @classmethod
     def empty(cls) -> "Calibration":
         return cls()
+
+    def matches(self, params: StrategyParams) -> bool:
+        """¿Se calibró con la estrategia que está corriendo ahora?
+
+        Una calibración de otra versión de la estrategia describe operaciones
+        que el bot ya no genera. Publicar su acierto sería atribuir a estas
+        señales el historial de otras.
+        """
+        if not self.strategy_signature:
+            return False
+        return self.strategy_signature == params.signature
 
     @property
     def is_calibrated(self) -> bool:
@@ -246,7 +269,10 @@ class Calibration:
 
     @classmethod
     def from_outcomes(
-        cls, outcomes: list[tuple[str, float, bool, float]], notes: str = ""
+        cls,
+        outcomes: list[tuple[str, float, bool, float]],
+        notes: str = "",
+        signature: str = "",
     ) -> "Calibration":
         """Construye la tabla desde (clase de activo, puntuación, ¿ganó?, R)."""
         by_class: dict[str, OutcomeStats] = {}
@@ -270,6 +296,7 @@ class Calibration:
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             total_signals=len(outcomes),
             notes=notes,
+            strategy_signature=signature,
         )
 
     def for_asset_class(self, asset_class: str) -> OutcomeStats | None:
@@ -296,6 +323,7 @@ class Calibration:
             "generated_at": self.generated_at,
             "total_signals": self.total_signals,
             "notes": self.notes,
+            "strategy_signature": self.strategy_signature,
             "score_ranks_correctly": self.score_ranks_correctly(),
             "by_asset_class": {k: v.to_dict() for k, v in self.by_asset_class.items()},
             "by_score": [b.to_dict() for b in self.by_score],
@@ -328,6 +356,7 @@ class Calibration:
             generated_at=raw.get("generated_at", ""),
             total_signals=int(raw.get("total_signals", 0)),
             notes=raw.get("notes", ""),
+            strategy_signature=raw.get("strategy_signature", ""),
         )
 
     # ── Informes ──────────────────────────────────────────────────────────────

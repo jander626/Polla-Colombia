@@ -8,6 +8,7 @@ precisamente para ajustarlos con datos.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -189,6 +190,29 @@ class StrategyParams:
     def weight_map(self) -> dict[str, float]:
         return dict(self.weights)
 
+    @property
+    def signature(self) -> str:
+        """Huella de los parámetros que cambian qué señales se generan.
+
+        Sirve para detectar una calibración obsoleta. Ocurrió de verdad: se
+        calibró a las 04:07, se cambió la estrategia a las 04:24, y el bot
+        siguió publicando la confianza de la versión anterior sin que nada
+        avisara. Un número que dice venir de un backtest tiene que venir del
+        backtest de ESTA estrategia, o no significa nada.
+        """
+        parts = [
+            f"w={sorted(self.weights)}",
+            f"regime={self.use_market_regime_filter}:{self.market_regime_ma}",
+            f"adx={self.adx_min}",
+            f"pull={self.pullback_rsi_max}:{self.pullback_lookback}",
+            f"resume={self.resume_rsi_min}",
+            f"target={self.target_atr_mult}",
+            f"stop={self.min_stop_atr}:{self.stop_swing_lookback}",
+            f"rr={self.min_risk_reward}",
+            f"score={self.min_score}",
+        ]
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
 
 # ── Variantes a comparar ──────────────────────────────────────────────────────
 # Se definen A PRIORI desde la literatura, no buscando en los datos hasta que
@@ -248,6 +272,15 @@ UNCALIBRATED_CONFIDENCE = 0.0
 
 # Penalización máxima que el filtro de noticias puede aplicar. Gemini solo resta.
 MAX_LLM_PENALTY = 25.0
+
+# Ventaja mínima para considerarla útil, en múltiplos de R.
+#
+# Una esperanza de +0.005R es estadísticamente positiva y económicamente nada:
+# al imprimirla con dos decimales sale "+0.00R" mientras el mensaje afirma que
+# la señal gana. Esa contradicción apareció en la primera alerta real, y no era
+# un fallo de formato sino de criterio: "mayor que cero" no es lo mismo que
+# "suficiente para operar". Por debajo de este umbral la alerta lo dice.
+MIN_MEANINGFUL_EXPECTANCY = 0.05
 
 
 @dataclass(frozen=True)
