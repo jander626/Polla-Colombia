@@ -13,10 +13,11 @@ import pytest
 
 from trading.config import DEFAULT_PARAMS, MAX_LLM_PENALTY, replace
 from trading.risk import (
-    BucketStats,
     Calibration,
+    OutcomeStats,
     apply_llm_penalty,
     compute_levels,
+    mean_lower_bound,
     wilson_lower_bound,
 )
 
@@ -119,80 +120,214 @@ def test_target_below_entry_produces_no_levels():
     assert compute_levels(100.0, 2.0, 96.0, params) is None
 
 
+# ── Límite inferior de la media ───────────────────────────────────────────────
+
+def test_mean_lower_bound_punishes_small_samples():
+    """+0.50R sacado de 12 operaciones no puede publicarse como +0.50R."""
+    values = [3.0, -1.0] * 6                       # media +1.0, n=12
+    total, squares = sum(values), sum(v * v for v in values)
+    assert mean_lower_bound(total, squares, len(values)) < 1.0
+
+
+def test_mean_lower_bound_converges_with_evidence():
+    few = mean_lower_bound(12.0, 60.0, 12)
+    many = mean_lower_bound(1200.0, 6000.0, 1200)   # misma media, más muestra
+    assert few < many
+
+
+def test_mean_lower_bound_needs_two_samples():
+    assert mean_lower_bound(5.0, 25.0, 1) == 0.0
+
+
+def test_mean_lower_bound_of_constant_values_is_the_value():
+    values = [2.0] * 50
+    total, squares = sum(values), sum(v * v for v in values)
+    assert mean_lower_bound(total, squares, 50) == pytest.approx(2.0)
+
+
 # ── Calibración ───────────────────────────────────────────────────────────────
 
-def test_outcomes_land_in_the_right_buckets():
-    outcomes = [(55.0, True), (55.0, False), (75.0, True), (85.0, True)]
-    calibration = Calibration.from_results(outcomes)
+def outcomes(
+    asset_class: str, score: float, wins: int, losses: int, win_r: float = 2.5
+):
+    """Genera (clase, puntuación, ¿ganó?, R) con pagos asimétricos realistas.
 
-    low = calibration.bucket_for(55.0)
-    assert low is not None and low.samples == 2 and low.wins == 1
-    assert low.win_rate == pytest.approx(0.5)
+    Las ganadoras rinden `win_r` y las perdedoras -1R, que es la forma del
+    sistema real: pocas aciertos, pero cada uno vale por varias pérdidas.
+    """
+    return [(asset_class, score, True, win_r)] * wins + [
+        (asset_class, score, False, -1.0)
+    ] * losses
 
-    high = calibration.bucket_for(85.0)
-    assert high is not None and high.samples == 1 and high.wins == 1
+
+def test_calibration_segments_by_asset_class():
+    """Es lo que sí discrimina: el forex rinde muy distinto de las acciones."""
+    data = outcomes("forex", 55.0, 30, 34) + outcomes("stock", 55.0, 160, 320)
+    calibration = Calibration.from_outcomes(data)
+
+    forex = calibration.for_asset_class("forex")
+    stock = calibration.for_asset_class("stock")
+    assert forex is not None and stock is not None
+    assert forex.win_rate > stock.win_rate
+    assert forex.expectancy_r > stock.expectancy_r
 
 
-def test_uncalibrated_confidence_is_zero_and_flagged():
+def test_an_unknown_asset_class_has_no_stats():
+    calibration = Calibration.from_outcomes(outcomes("stock", 55.0, 10, 10))
+    assert calibration.for_asset_class("crypto") is None
+
+
+def test_uncalibrated_is_flagged():
     """Un bot recién instalado no ha demostrado nada y debe decirlo."""
-    confidence, reliable = Calibration.empty().confidence_for(75.0)
-    assert confidence == 0.0
-    assert reliable is False
+    empty = Calibration.empty()
+    assert not empty.is_calibrated
+    assert empty.for_asset_class("stock") is None
 
 
-def test_confidence_is_below_raw_win_rate():
-    outcomes = [(75.0, True)] * 8 + [(75.0, False)] * 2  # 80% crudo, n=10
-    bucket = Calibration.from_results(outcomes).bucket_for(75.0)
-    assert bucket is not None
-    assert bucket.win_rate == pytest.approx(0.8)
-    assert bucket.confidence < 80.0
-    assert bucket.is_reliable is False  # 10 muestras no bastan
+def test_published_win_rate_is_below_the_raw_one():
+    stats = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 8, 2)
+    ).for_asset_class("stock")
+    assert stats is not None
+    assert stats.win_rate == pytest.approx(0.8)
+    assert stats.win_rate_lower < 80.0
+    assert not stats.is_reliable          # 10 operaciones no bastan
 
 
-def test_bucket_becomes_reliable_with_enough_samples():
-    outcomes = [(65.0, True)] * 30 + [(65.0, False)] * 20
-    bucket = Calibration.from_results(outcomes).bucket_for(65.0)
-    assert bucket is not None and bucket.is_reliable
+def test_enough_samples_makes_a_segment_reliable():
+    stats = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 30, 20)
+    ).for_asset_class("stock")
+    assert stats is not None and stats.is_reliable
 
+
+def test_a_low_win_rate_can_still_carry_an_edge():
+    """El hallazgo central del primer backtest: 35% de acierto y aun así gana.
+
+    Publicar solo el acierto haría leer esta señal como perdedora, cuando su
+    esperanza es claramente positiva porque el objetivo está el doble de lejos
+    que el stop.
+    """
+    # Las cifras del primer backtest real: 193 aciertos de 549 operaciones.
+    stats = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 193, 356)
+    ).for_asset_class("stock")
+    assert stats is not None
+    assert stats.win_rate < 0.40
+    assert stats.expectancy_r > 0
+    assert stats.has_edge
+
+
+def test_a_thin_edge_does_not_survive_its_own_uncertainty():
+    """Con pago de 2R exactos, un 35% de acierto ya no demuestra ventaja.
+
+    La esperanza sale en +0.05R, positiva pero indistinguible de cero. Es
+    justo el caso que `has_edge` existe para atrapar: una media favorable que
+    no aguanta su propio intervalo de confianza.
+    """
+    stats = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 193, 356, win_r=2.0)
+    ).for_asset_class("stock")
+    assert stats is not None
+    assert stats.expectancy_r > 0
+    assert not stats.has_edge
+
+
+def test_an_edge_that_does_not_survive_its_uncertainty_is_not_an_edge():
+    stats = Calibration.from_outcomes(
+        outcomes("forex", 55.0, 4, 7)
+    ).for_asset_class("forex")
+    assert stats is not None
+    assert stats.expectancy_r > 0        # media positiva por casualidad
+    assert not stats.has_edge            # pero no sobrevive al intervalo
+
+
+# ── Diagnóstico: ¿ordena la puntuación? ───────────────────────────────────────
+
+def test_a_monotonic_score_is_detected_as_ranking():
+    data = (
+        outcomes("stock", 55.0, 30, 70)
+        + outcomes("stock", 65.0, 40, 60)
+        + outcomes("stock", 75.0, 50, 50)
+        + outcomes("stock", 85.0, 60, 40)
+    )
+    assert Calibration.from_outcomes(data).score_ranks_correctly()
+
+
+def test_a_non_monotonic_score_is_rejected():
+    """Lo que ocurrió de verdad: el tramo 60-70 acertaba menos que el 50-60."""
+    data = (
+        outcomes("stock", 55.0, 122, 223)   # 35.4%
+        + outcomes("stock", 65.0, 57, 118)  # 32.6%, peor
+    )
+    assert not Calibration.from_outcomes(data).score_ranks_correctly()
+
+
+def test_score_ranking_needs_two_reliable_buckets():
+    assert not Calibration.from_outcomes(outcomes("stock", 55.0, 2, 1)).score_ranks_correctly()
+
+
+# ── Persistencia ──────────────────────────────────────────────────────────────
 
 def test_calibration_survives_a_save_load_round_trip(tmp_path):
-    outcomes = [(55.0, True), (65.0, False), (75.0, True), (85.0, True)]
-    original = Calibration.from_results(outcomes, notes="prueba")
+    data = outcomes("stock", 55.0, 40, 60) + outcomes("forex", 75.0, 20, 15)
+    original = Calibration.from_outcomes(data, notes="prueba")
     path = tmp_path / "calibration.json"
     original.save(str(path))
 
     restored = Calibration.load(str(path))
     assert restored.total_signals == original.total_signals
     assert restored.notes == "prueba"
-    for before, after in zip(original.buckets, restored.buckets):
-        assert (before.samples, before.wins) == (after.samples, after.wins)
-        assert before.confidence == pytest.approx(after.confidence)
+    for name, before in original.by_asset_class.items():
+        after = restored.for_asset_class(name)
+        assert after is not None
+        assert (after.samples, after.wins) == (before.samples, before.wins)
+        assert after.expectancy_r == pytest.approx(before.expectancy_r)
+        assert after.win_rate_lower == pytest.approx(before.win_rate_lower)
 
 
 def test_corrupt_calibration_file_degrades_instead_of_crashing(tmp_path):
     path = tmp_path / "calibration.json"
     path.write_text("{ esto no es json", encoding="utf-8")
     restored = Calibration.load(str(path))
-    assert restored.buckets == []
-    assert restored.confidence_for(75.0) == (0.0, False)
+    assert not restored.is_calibrated
+    assert restored.for_asset_class("stock") is None
 
 
 def test_missing_calibration_file_is_empty(tmp_path):
-    assert Calibration.load(str(tmp_path / "no-existe.json")).buckets == []
-
-
-def test_summary_table_reports_every_bucket():
-    calibration = Calibration.from_results([(55.0, True), (85.0, False)])
-    table = calibration.summary_table()
-    assert "50-60" in table and "80-100" in table
+    assert not Calibration.load(str(tmp_path / "no-existe.json")).is_calibrated
 
 
 def test_saved_file_is_readable_json(tmp_path):
     path = tmp_path / "calibration.json"
-    Calibration.from_results([(65.0, True)] * 40).save(str(path))
+    Calibration.from_outcomes(outcomes("stock", 65.0, 25, 15)).save(str(path))
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["total_signals"] == 40
-    assert any(b["reliable"] for b in raw["buckets"])
+    assert raw["by_asset_class"]["stock"]["reliable"] is True
+    assert "score_ranks_correctly" in raw
+
+
+def test_summary_table_reports_both_views():
+    calibration = Calibration.from_outcomes(
+        outcomes("stock", 55.0, 40, 60) + outcomes("forex", 75.0, 20, 15)
+    )
+    table = calibration.summary_table()
+    assert "stock" in table and "forex" in table
+    assert "50-60" in table and "70-80" in table
+    assert "NO ordena" in table or "ordena" in table
+
+
+def test_summary_table_without_calibration():
+    assert "Sin calibración" in Calibration.empty().summary_table()
+
+
+def test_outcome_stats_with_zero_samples_is_safe():
+    stats = OutcomeStats(label="vacío")
+    assert stats.win_rate == 0.0
+    assert stats.win_rate_lower == 0.0
+    assert stats.expectancy_r == 0.0
+    assert not stats.is_reliable
+    assert not stats.has_edge
 
 
 # ── Penalización del filtro de noticias ───────────────────────────────────────
@@ -208,10 +343,3 @@ def test_llm_penalty_is_capped():
 
 def test_confidence_never_goes_negative():
     assert apply_llm_penalty(5.0, 25.0, MAX_LLM_PENALTY) == 0.0
-
-
-def test_bucket_stats_with_zero_samples_is_safe():
-    bucket = BucketStats(low=50.0, high=60.0, samples=0, wins=0)
-    assert bucket.win_rate == 0.0
-    assert bucket.confidence == 0.0
-    assert bucket.is_reliable is False

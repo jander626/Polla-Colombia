@@ -22,7 +22,7 @@ import requests
 
 from .config import TELEGRAM_TOKEN
 from .llm_filter import EventRisk
-from .risk import Calibration
+from .risk import Calibration, OutcomeStats
 from .strategy import Signal
 from .universe import Instrument, get as get_instrument
 
@@ -121,25 +121,56 @@ def _fmt(value: float, instrument: Instrument) -> str:
     return f"{value:.{instrument.price_decimals}f}"
 
 
-def _confidence_line(confidence: float, reliable: bool, calibrated: bool) -> str:
-    if not calibrated:
+def _confidence_block(stats: Optional[OutcomeStats], penalty: float = 0.0) -> str:
+    """Bloque de confianza: acierto histórico Y beneficio esperado.
+
+    Publicar solo el acierto engañaba. Este sistema acierta alrededor del 35% de
+    las veces y aun así gana dinero, porque el objetivo está al doble de
+    distancia que el stop; una alerta que dijera «confianza 35%» se leería como
+    «esto va a fallar», que es justo lo contrario. Las dos cifras juntas, con la
+    explicación, es lo único honesto.
+    """
+    if stats is None or stats.samples == 0:
         return (
-            "📊 *Confianza: sin calibrar*\n"
+            "📊 *Sin calibrar*\n"
+            "     _No hay histórico para este tipo de instrumento._\n"
             "     _Ejecuta el backtest antes de fiarte de esta señal._"
         )
-    if not reliable:
-        return (
-            f"📊 *Confianza: {confidence:.0f}%*\n"
-            "     _Basada en pocas operaciones históricas: poco fiable._"
+
+    win_rate = max(0.0, stats.win_rate_lower - penalty)
+    expectancy = stats.expectancy_lower
+
+    lines = [
+        f"📊 *Acierto histórico: {win_rate:.0f}%*",
+        f"💰 *Beneficio esperado: {expectancy:+.2f}R por operación*",
+    ]
+
+    if expectancy > 0:
+        lines.append(
+            f"     _De cada 100 señales así, ~{win_rate:.0f} llegan al objetivo._\n"
+            "     _Gana en el agregado porque el objetivo está más lejos que el stop._"
         )
-    return f"📊 *Confianza: {confidence:.0f}%*"
+    else:
+        # Esperanza no positiva: la señal no ha demostrado ventaja y hay que
+        # decirlo con todas las letras, no esconderlo tras un porcentaje.
+        lines.append(
+            "     ⚠️ _Sin ventaja demostrada en el histórico para esta clase de\n"
+            "     activo. Trátala como informativa, no como recomendación._"
+        )
+
+    if not stats.is_reliable:
+        lines.append(
+            f"     _Solo {stats.samples} operaciones históricas: poco fiable._"
+        )
+    if penalty > 0:
+        lines.append(f"     _Acierto reducido en {penalty:.0f} puntos por riesgo de evento._")
+
+    return "\n".join(lines)
 
 
 def format_signal(
     signal: Signal,
     calibration: Calibration,
-    confidence: float,
-    reliable: bool,
     risk: Optional[EventRisk] = None,
 ) -> str:
     """Mensaje de alerta de compra.
@@ -161,17 +192,16 @@ def format_signal(
         f"🛑 Stop: *{_fmt(levels.stop, instrument)}*",
         f"⚖️ Riesgo/beneficio: *1:{levels.risk_reward:.2f}*",
         "",
-        _confidence_line(confidence, reliable, bool(calibration.buckets)),
+        _confidence_block(
+            calibration.for_asset_class(signal.asset_class),
+            penalty=risk.penalty if risk is not None else 0.0,
+        ),
     ]
 
     if risk is not None and risk.rationale:
         lines += ["", f"💡 {sanitize(risk.rationale)}"]
     if risk is not None and risk.risks:
         lines += [f"⚠️ {sanitize(risk.risks)}"]
-    if risk is not None and risk.penalty > 0:
-        lines += [
-            f"     _Confianza reducida en {risk.penalty:.0f} puntos por riesgo de evento._"
-        ]
     if risk is None:
         lines += ["", "_Sin verificación de noticias en esta señal._"]
 

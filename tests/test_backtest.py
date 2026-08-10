@@ -274,12 +274,18 @@ def test_calibration_is_built_from_actual_outcomes():
     )
     calibration = report.to_calibration()
 
-    top = calibration.bucket_for(85.0)
-    bottom = calibration.bucket_for(55.0)
-    assert top is not None and top.samples == 3 and top.wins == 3
-    assert bottom is not None and bottom.samples == 2 and bottom.wins == 0
-    # Aun con 3 de 3, la confianza publicada no llega al 100%.
-    assert 0.0 < top.confidence < 100.0
+    # La calibración que alimenta las alertas se segmenta por clase de activo.
+    stats = calibration.for_asset_class("stock")
+    assert stats is not None
+    assert stats.samples == 5 and stats.wins == 3
+
+    # Aun con 3 de 5, el acierto publicado queda por debajo del crudo.
+    assert 0.0 < stats.win_rate_lower < 100.0 * stats.win_rate
+
+    # Los tramos de puntuación se conservan solo como diagnóstico.
+    by_label = {b.label: b for b in calibration.by_score}
+    assert by_label["80-100"].samples == 3 and by_label["80-100"].wins == 3
+    assert by_label["50-60"].samples == 2 and by_label["50-60"].wins == 0
 
 
 # ── Extremo a extremo ─────────────────────────────────────────────────────────

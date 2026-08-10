@@ -88,7 +88,8 @@ def _deliver_signals(
 
     delivered = 0
     for signal in candidates:
-        confidence, reliable = calibration.confidence_for(signal.score)
+        stats = calibration.for_asset_class(signal.asset_class)
+        confidence = stats.win_rate_lower if stats else 0.0
 
         risk = llm_filter.check(signal) if use_llm else None
         if risk is not None:
@@ -97,7 +98,7 @@ def _deliver_signals(
                 continue
             confidence = apply_llm_penalty(confidence, risk.penalty, MAX_LLM_PENALTY)
 
-        message = notify.format_signal(signal, calibration, confidence, reliable, risk)
+        message = notify.format_signal(signal, calibration, risk)
 
         if dry_run:
             print(message)
@@ -142,7 +143,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     signals = scan_universe(liquid, bars, params, benchmark)
     calibration = Calibration.load(CALIBRATION_FILE)
-    if not calibration.buckets:
+    if not calibration.is_calibrated:
         print(
             "[WARN] Sin calibration.json: las alertas saldrán marcadas como "
             "'sin calibrar'. Ejecuta el backtest."
@@ -322,6 +323,12 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     report = run_backtest(tradable, bars, params, DEFAULT_BACKTEST, benchmark)
     print()
     print(report.summary())
+
+    print()
+    print("── Diagnóstico de la puntuación ───────────────────────")
+    print(report.score_distribution())
+    print()
+    print(report.component_diagnostics())
 
     calibration = report.to_calibration()
     print()

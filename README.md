@@ -40,22 +40,38 @@ alcista, la operación no se ejecuta), el **stop** se apoya en el mínimo del
 retroceso y el **objetivo** está a 3 ATR. Cualquier señal por debajo de 1.5 de
 ratio riesgo/beneficio se descarta.
 
-### El porcentaje de confianza
+### La confianza
 
-Es la decisión de diseño central: **no lo inventa un modelo de lenguaje.**
+Es la decisión de diseño central: **no la inventa un modelo de lenguaje.**
 
 Pedirle a un LLM "dame la probabilidad de que esto funcione" devuelve un
 número plausible y ficticio, que es peor que no dar ninguno porque invita a
-confiar en él. En su lugar:
+confiar en él. En su lugar, el backtest mide el resultado real sobre años de
+historia y publica el **límite inferior** del intervalo, que castiga la falta
+de muestra: 2 aciertos de 3 no se publican como "67%". Gemini solo puede
+**restar**, nunca sumar.
 
-1. El backtest simula la estrategia sobre años de historia.
-2. Agrupa las señales por tramo de puntuación y mide el acierto real de cada uno.
-3. Publica el **límite inferior del intervalo de Wilson**, que castiga la falta
-   de muestra: 2 aciertos de 3 no se publican como "67%".
-4. Gemini solo puede **restar** confianza por riesgo de evento. Nunca sumar.
+Cada alerta muestra **dos cifras, no una**:
 
-Cuando la alerta dice 64%, significa algo comprobable: *de las señales
-históricas con este perfil, el 64% alcanzó el objetivo antes que el stop.*
+```
+📊 Acierto histórico: 31%
+💰 Beneficio esperado: +0.12R por operación
+```
+
+Publicar solo el acierto engañaba. Este sistema acierta alrededor del 35% de
+las veces **y aun así gana dinero**, porque el objetivo está al doble de
+distancia que el stop. Una alerta que dijera "confianza 35%" se leería como
+"esto va a fallar", que es exactamente lo contrario de lo que significa.
+
+Si la esperanza no sobrevive a su propio intervalo de confianza, la alerta lo
+dice: *"sin ventaja demostrada"*. Una media favorable con muestra insuficiente
+no es una ventaja, es ruido que salió a favor.
+
+**La calibración se segmenta por clase de activo, no por puntuación técnica.**
+El primer backtest mostró que la puntuación no ordenaba —el tramo 60-70
+acertaba menos que el 50-60— mientras que la clase de activo discrimina con
+claridad. Los tramos de puntuación se conservan como diagnóstico, y el propio
+informe avisa cuando vuelven a ser utilizables.
 
 Sin `calibration.json` las alertas salen marcadas como **sin calibrar**, y eso
 es deliberado: un bot recién instalado no ha demostrado nada.
@@ -121,7 +137,7 @@ export TWELVEDATA_API_KEY=...
 python trading_bot.py backtest --years 5 --write   # calibrar
 python trading_bot.py scan --force --dry-run       # escanear sin enviar nada
 python trading_bot.py track                        # revisar operaciones abiertas
-python -m pytest tests/                            # 160 tests
+python -m pytest tests/                            # 175 tests
 ```
 
 ---

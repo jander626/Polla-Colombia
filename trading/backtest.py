@@ -43,6 +43,11 @@ class Trade:
     signal_date: pd.Timestamp
     score: float
     outcome: Outcome
+    # Componentes de la puntuación en el momento de la señal. Se arrastran
+    # hasta aquí para poder medir cuáles predicen de verdad el resultado: la
+    # primera medición reveló que la puntuación agregada no ordenaba, y sin
+    # este desglose no hay forma de saber qué parte la estaba estropeando.
+    components: dict[str, float] = field(default_factory=dict)
     entry_date: Optional[pd.Timestamp] = None
     entry_price: float = float("nan")
     exit_date: Optional[pd.Timestamp] = None
@@ -85,6 +90,7 @@ def simulate_signal(
             signal_date=signal.bar_date,
             score=signal.score,
             outcome="no_fill",
+            components=dict(signal.components),
         )
 
     base = Trade(
@@ -95,6 +101,7 @@ def simulate_signal(
         outcome="no_fill",
         stop=levels.stop,
         target=levels.target,
+        components=dict(signal.components),
     )
 
     # ── Fase 1: ¿se llega a ejecutar la orden condicional? ────────────────────
@@ -175,6 +182,7 @@ def simulate_signal(
         signal_date=signal.bar_date,
         score=signal.score,
         outcome=outcome,
+        components=dict(signal.components),
         entry_date=index[entry_pos],
         entry_price=entry_price,
         exit_date=index[exit_at],
@@ -243,12 +251,96 @@ class BacktestReport:
             worst = min(worst, equity - peak)
         return worst
 
-    def scored_outcomes(self) -> list[tuple[float, bool]]:
-        return [(t.score, t.is_win) for t in self.filled]
+    def outcomes(self) -> list[tuple[str, float, bool, float]]:
+        """(clase de activo, puntuación, ¿ganó?, R) de cada operación ejecutada."""
+        return [
+            (t.asset_class, t.score, t.is_win, t.r_multiple)
+            for t in self.filled
+            if np.isfinite(t.r_multiple)
+        ]
 
     def to_calibration(self) -> Calibration:
-        return Calibration.from_results(
-            self.scored_outcomes(), notes=" | ".join(self.notes)
+        return Calibration.from_outcomes(self.outcomes(), notes=" | ".join(self.notes))
+
+    def component_diagnostics(self, quantiles: int = 4) -> str:
+        """Mide si cada componente de la puntuación predice el resultado.
+
+        Divide las operaciones en cuartiles según el valor de cada componente y
+        compara el R medio del cuartil más bajo con el más alto. Un componente
+        útil produce una diferencia positiva y clara; uno inútil da ruido, y uno
+        con la diferencia invertida está *empeorando* la puntuación agregada y
+        conviene quitarlo o darle la vuelta.
+
+        Es el diagnóstico que faltaba cuando la primera medición mostró que la
+        puntuación no ordenaba: sin él solo se sabía que algo iba mal, no qué.
+        """
+        filled = [t for t in self.filled if t.components and np.isfinite(t.r_multiple)]
+        if len(filled) < quantiles * 10:
+            return "Muestra insuficiente para diagnosticar los componentes."
+
+        keys = sorted({k for t in filled for k in t.components})
+        lines = [
+            f"{'Componente':<20} {'Q1 (bajo)':>12} {'Q4 (alto)':>12} "
+            f"{'Δ R':>9} {'Veredicto':>12}",
+        ]
+
+        for key in keys:
+            usable = [t for t in filled if key in t.components]
+            if len(usable) < quantiles * 10:
+                continue
+
+            values = np.array([t.components[key] for t in usable])
+            r_values = np.array([t.r_multiple for t in usable])
+            edges = np.quantile(values, np.linspace(0, 1, quantiles + 1))
+
+            # Un componente constante no tiene cuartiles que comparar.
+            if edges[0] == edges[-1]:
+                lines.append(f"{key:<20} {'—':>12} {'—':>12} {'—':>9} {'constante':>12}")
+                continue
+
+            low_mask = values <= edges[1]
+            high_mask = values >= edges[quantiles - 1]
+            if low_mask.sum() < 5 or high_mask.sum() < 5:
+                continue
+
+            low_r = float(r_values[low_mask].mean())
+            high_r = float(r_values[high_mask].mean())
+            delta = high_r - low_r
+
+            if delta > 0.15:
+                verdict = "predice"
+            elif delta < -0.15:
+                verdict = "INVERTIDO"
+            else:
+                verdict = "ruido"
+
+            lines.append(
+                f"{key:<20} {low_r:>+12.3f} {high_r:>+12.3f} "
+                f"{delta:>+9.3f} {verdict:>12}"
+            )
+
+        lines.append(
+            "\n  'predice' = el cuartil alto rinde más que el bajo, como debe ser."
+            "\n  'INVERTIDO' = el componente está restando: penaliza justo lo que"
+            "\n                debería premiar, y arrastra a la puntuación agregada."
+            "\n  'ruido' = no aporta información; su peso podría repartirse mejor."
+        )
+        return "\n".join(lines)
+
+    def score_distribution(self) -> str:
+        """Cuántas señales caen en cada tramo de puntuación.
+
+        La primera medición mostró un 95% de las señales entre 50 y 70 y ninguna
+        por encima de 80: con la puntuación tan comprimida, elegir «las mejores
+        del día» era elegir casi al azar.
+        """
+        scores = np.array([t.score for t in self.filled])
+        if not len(scores):
+            return "Sin operaciones."
+        return (
+            f"Puntuación — mín {scores.min():.1f} · p25 {np.percentile(scores, 25):.1f} · "
+            f"mediana {np.median(scores):.1f} · p75 {np.percentile(scores, 75):.1f} · "
+            f"máx {scores.max():.1f}"
         )
 
     def summary(self) -> str:
