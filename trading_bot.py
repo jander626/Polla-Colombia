@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from trading import llm_filter, notify, universe
-from trading.backtest import run_backtest
+from trading.backtest import compare_variants, run_backtest
 from trading.config import (
     CALIBRATION_FILE,
     DEFAULT_BACKTEST,
@@ -32,6 +32,7 @@ from trading.config import (
     MAX_LLM_PENALTY,
     STATE_FILE,
     StrategyParams,
+    variants,
 )
 from trading.data import MarketData
 from trading.risk import Calibration, apply_llm_penalty
@@ -320,9 +321,30 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     tradable = [i for i in instruments if i.symbol in bars]
     print(f"[INFO] Con datos utilizables: {len(tradable)}/{len(instruments)}")
 
+    if args.compare:
+        # Se miden las tres variantes definidas a priori y se publican todas.
+        table, reports = compare_variants(
+            variants(), tradable, bars, DEFAULT_BACKTEST, benchmark
+        )
+        print()
+        print("── Comparación de variantes ───────────────────────────")
+        print(table)
+        for name, rep in reports.items():
+            print()
+            print(f"── {name}: partición temporal ─────────────────────────")
+            print(rep.out_of_sample_split())
+        print(
+            "\n[INFO] Comparación informativa: no escribe calibración. Elige una "
+            "variante, hazla la de por defecto y vuelve a ejecutar con --write."
+        )
+        return 0
+
     report = run_backtest(tradable, bars, params, DEFAULT_BACKTEST, benchmark)
     print()
     print(report.summary())
+    print()
+    print("── Partición temporal (¿la ventaja aguanta?) ──────────")
+    print(report.out_of_sample_split())
 
     print()
     print("── Diagnóstico de la puntuación ───────────────────────")
@@ -411,13 +433,19 @@ def main() -> int:
     p.add_argument("--years", type=int, default=DEFAULT_BACKTEST.years)
     p.add_argument("--write", action="store_true", help="Guarda calibration.json")
     p.add_argument("--offline", action="store_true", help="Usa solo la caché")
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compara las variantes a priori en vez de calibrar",
+    )
     p.set_defaults(func=cmd_backtest)
 
     args = parser.parse_args()
     # Los modos comparten helpers que consultan estos flags aunque no todos los
     # definan; se rellenan para no tener que comprobar su existencia en cada uso.
     for flag, default in (
-        ("offline", False), ("dry_run", False), ("force", False), ("no_llm", False),
+        ("offline", False), ("dry_run", False), ("force", False),
+        ("no_llm", False), ("compare", False),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)

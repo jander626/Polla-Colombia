@@ -164,6 +164,36 @@ def pct_from(series: pd.Series, reference: pd.Series) -> pd.Series:
     return (series - ref) / ref
 
 
+def momentum_12_1(close: pd.Series, window: int = 252, skip: int = 21) -> pd.Series:
+    """Momentum de Jegadeesh y Titman: rendimiento de 12 meses saltando el último.
+
+    El mes más reciente se excluye a propósito, y no por capricho: a ese
+    horizonte domina la reversión a corto plazo, que apunta en sentido
+    contrario. Meterlo dentro cancela parte del efecto — que es exactamente lo
+    que le pasaba a la ventana de 60 sesiones que usábamos antes.
+    """
+    c = close.astype(float)
+    return (c.shift(skip) / c.shift(skip + window)) - 1.0
+
+
+def short_term_reversal(close: pd.Series, window: int = 21) -> pd.Series:
+    """Rendimiento del último mes, con el signo invertido.
+
+    Positivo = el instrumento se ha quedado atrás y, según la evidencia de
+    reversión a corto plazo, tiene más recorrido. Se devuelve ya invertido para
+    que un valor alto signifique siempre "mejor", igual que el resto de
+    componentes.
+    """
+    c = close.astype(float)
+    return -((c / c.shift(window)) - 1.0)
+
+
+def above_moving_average(series: pd.Series, window: int) -> pd.Series:
+    """True cuando la serie está por encima de su media simple de `window`."""
+    s = series.astype(float)
+    return s > s.rolling(window, min_periods=window).mean()
+
+
 def relative_strength(close: pd.Series, benchmark: pd.Series, window: int = 60) -> pd.Series:
     """Rendimiento del instrumento menos el del benchmark en `window` sesiones.
 

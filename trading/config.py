@@ -137,16 +137,89 @@ class StrategyParams:
     resistance_lookback: int = 60
     headroom_target_atr: float = 3.0  # espacio libre "de sobra", en múltiplos de ATR
 
+    # ── Componentes con respaldo académico ───────────────────────────────────
+    # La primera medición mostró que la fuerza relativa a 60 sesiones puntuaba
+    # AL REVÉS: el cuartil que más había batido al mercado rendía +0.002R y el
+    # que menos, +0.155R. No fue mala suerte: 60 sesiones cae en la zona de la
+    # *reversión a corto plazo* (Jegadeesh, 1990), donde los ganadores
+    # recientes se quedan atrás.
+    #
+    # Son dos efectos distintos y opuestos según el horizonte, y mezclarlos en
+    # una sola ventana los cancelaba:
+    #   - Momentum 12-1 (Jegadeesh y Titman, 1993): 12 meses excluyendo el
+    #     último. Su revisión de 2023 confirma que no ha decaído.
+    #   - Reversión corta: el último mes, con el signo invertido.
+    momentum_window: int = 252       # ~12 meses
+    momentum_skip: int = 21          # se excluye el último mes
+    reversal_window: int = 21        # ~1 mes, se puntúa invertido
+    relative_strength_window: int = 60   # solo diagnóstico; ya no puntúa
+
+    # Filtro de régimen de mercado: solo comprar acciones con el índice de
+    # referencia por encima de su media de 200 sesiones. Documentado como la
+    # forma más barata de recortar la máxima caída en estrategias de reversión,
+    # que es justo el peor número del sistema (-28.9R). No se aplica al forex:
+    # el S&P no es su régimen.
+    use_market_regime_filter: bool = True
+    market_regime_ma: int = 200
+
+    # Pesos del scoring. Viven en los parámetros —y no como constante del
+    # módulo— para que el backtest pueda comparar variantes sin tocar la lógica.
+    weights: tuple[tuple[str, float], ...] = (
+        ("pullback", 0.30),
+        ("momentum", 0.18),
+        ("trend", 0.15),
+        ("momentum_12_1", 0.15),
+        ("reversal", 0.12),
+        ("headroom", 0.05),
+        ("volume", 0.05),
+    )
+
     # Otros
     rsi_period: int = 14
-    relative_strength_window: int = 60
     max_signals_per_scan: int = 5    # cuántas pasan al filtro de noticias (Gemini)
     min_score: float = 50.0          # puntuación mínima para considerar la señal
 
-    # Barras mínimas de historia para que los indicadores sean fiables.
+    # Barras mínimas de historia para que los indicadores sean fiables. El
+    # momentum a 12 meses es ahora el indicador más exigente en historia.
     @property
     def min_bars(self) -> int:
-        return self.ema_slow + 60
+        return max(self.ema_slow, self.momentum_window + self.momentum_skip) + 60
+
+    @property
+    def weight_map(self) -> dict[str, float]:
+        return dict(self.weights)
+
+
+# ── Variantes a comparar ──────────────────────────────────────────────────────
+# Se definen A PRIORI desde la literatura, no buscando en los datos hasta que
+# algo salga bien. Probar diez variantes sobre la misma muestra garantiza que
+# una parezca buena por azar; por eso son tres, están fijadas de antemano, y el
+# informe publica las tres — no solo la que gane.
+
+BASELINE_WEIGHTS: tuple[tuple[str, float], ...] = (
+    ("pullback", 0.42),
+    ("momentum", 0.22),
+    ("trend", 0.18),
+    ("headroom", 0.09),
+    ("volume", 0.09),
+)
+
+
+def variants() -> dict[str, "StrategyParams"]:
+    """Las tres variantes que se comparan, y qué pregunta responde cada una."""
+    fixed = StrategyParams(
+        weights=BASELINE_WEIGHTS, use_market_regime_filter=False
+    )
+    return {
+        # A: solo quitar el componente que puntuaba al revés.
+        "A_sin_fuerza_relativa": fixed,
+        # B: A + filtro de régimen. ¿Recorta la caída máxima?
+        "B_con_regimen": replace(fixed, use_market_regime_filter=True),
+        # C: B + los dos efectos documentados, cada uno en su horizonte.
+        "C_momentum_y_reversion": replace(
+            fixed, use_market_regime_filter=True, weights=StrategyParams().weights
+        ),
+    }
 
 
 DEFAULT_PARAMS = StrategyParams()

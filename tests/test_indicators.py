@@ -152,3 +152,53 @@ def test_no_lookahead(uptrend_with_pullback, cut):
         assert truncated_value == pytest.approx(full_value, rel=1e-9), (
             f"{name} mira al futuro: {truncated_value} != {full_value}"
         )
+
+
+# ── Momentum y reversión (efectos documentados, horizontes opuestos) ──────────
+
+def test_momentum_12_1_skips_the_most_recent_month():
+    """El salto del último mes no es un detalle: es lo que separa los dos efectos.
+
+    A 12 meses domina el momentum; al mes domina la reversión, que apunta en
+    sentido contrario. Incluir el último mes cancela parte del efecto — que es
+    exactamente lo que le pasaba a la ventana de 60 sesiones original.
+    """
+    n = 300
+    closes = pd.Series(np.arange(100.0, 100.0 + n))
+    out = ind.momentum_12_1(closes, window=252, skip=21)
+
+    # El valor final compara el precio de hace 21 sesiones con el de hace 273.
+    expected = closes.iloc[-22] / closes.iloc[-274] - 1.0
+    assert out.iloc[-1] == pytest.approx(expected)
+
+
+def test_momentum_12_1_needs_a_full_window():
+    out = ind.momentum_12_1(pd.Series(np.arange(100.0, 200.0)), 252, 21)
+    assert out.isna().all()
+
+
+def test_momentum_12_1_is_positive_for_a_riser():
+    closes = pd.Series(100.0 * np.cumprod(np.full(400, 1.002)))
+    assert ind.momentum_12_1(closes).iloc[-1] > 0
+
+
+def test_short_term_reversal_is_returned_inverted():
+    """Valor alto = se quedó atrás. Así 'más es mejor' en todos los componentes."""
+    riser = pd.Series(100.0 * np.cumprod(np.full(60, 1.01)))
+    faller = pd.Series(100.0 * np.cumprod(np.full(60, 0.99)))
+
+    assert ind.short_term_reversal(riser, 21).iloc[-1] < 0   # subió -> penalizado
+    assert ind.short_term_reversal(faller, 21).iloc[-1] > 0  # cayó -> premiado
+
+
+def test_above_moving_average_detects_the_regime():
+    rising = pd.Series(100.0 * np.cumprod(np.full(300, 1.003)))
+    falling = pd.Series(100.0 * np.cumprod(np.full(300, 0.997)))
+
+    assert bool(ind.above_moving_average(rising, 200).iloc[-1]) is True
+    assert bool(ind.above_moving_average(falling, 200).iloc[-1]) is False
+
+
+def test_above_moving_average_is_undefined_without_enough_history():
+    out = ind.above_moving_average(pd.Series(np.arange(50.0)), 200)
+    assert not out.any()
