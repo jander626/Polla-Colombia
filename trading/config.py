@@ -1,0 +1,214 @@
+"""Configuración central del bot de trading.
+
+Todos los umbrales de la estrategia viven aquí para que el backtest pueda
+barrerlos sin tocar la lógica. Los valores por defecto son una hipótesis
+razonable de partida, NO parámetros validados: la fase de backtest existe
+precisamente para ajustarlos con datos.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, replace
+from datetime import date
+from zoneinfo import ZoneInfo
+
+
+# ── Entorno ───────────────────────────────────────────────────────────────────
+# Se leen con .get() y no con [] para que importar el módulo nunca falle: los
+# modos offline (backtest sobre caché, tests) no necesitan credenciales.
+
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+STATE_FILE = os.environ.get("TRADING_STATE_FILE", "trading_state.json")
+CALIBRATION_FILE = os.environ.get("TRADING_CALIBRATION_FILE", "calibration.json")
+CACHE_DIR = os.environ.get("TRADING_CACHE_DIR", ".cache/market_data")
+
+
+# ── Husos horarios y calendario ───────────────────────────────────────────────
+
+NY_TZ = ZoneInfo("America/New_York")
+LONDON_TZ = ZoneInfo("Europe/London")
+BOGOTA_TZ = ZoneInfo("America/Bogota")  # zona del usuario, solo para mostrar horas
+
+# El escaneo se lanza antes de la apertura de EE.UU. El cron de GitHub Actions
+# es en UTC y se retrasa bajo carga, así que dispara cada 15 minutos dentro de
+# una ventana y es este módulo — con zonas horarias reales — el que decide si
+# toca ejecutar. Así el horario de verano deja de ser un problema.
+SCAN_HOUR_NY = 8
+SCAN_MINUTE_NY = 30
+SCAN_WINDOW_MINUTES = 90  # margen para absorber retrasos del cron
+
+# Festivos de NYSE/NASDAQ. Lista estática porque son ~10 al año y la
+# alternativa (pandas_market_calendars) arrastra dependencias pesadas para
+# resolver un problema trivial. Revisar y extender cada diciembre.
+MARKET_HOLIDAYS: frozenset[date] = frozenset(
+    {
+        # 2026
+        date(2026, 1, 1),    # Año Nuevo
+        date(2026, 1, 19),   # Martin Luther King Jr.
+        date(2026, 2, 16),   # Presidents' Day
+        date(2026, 4, 3),    # Viernes Santo
+        date(2026, 5, 25),   # Memorial Day
+        date(2026, 6, 19),   # Juneteenth
+        date(2026, 7, 3),    # Día de la Independencia (observado)
+        date(2026, 9, 7),    # Labor Day
+        date(2026, 11, 26),  # Acción de Gracias
+        date(2026, 12, 25),  # Navidad
+        # 2027
+        date(2027, 1, 1),
+        date(2027, 1, 18),
+        date(2027, 2, 15),
+        date(2027, 3, 26),
+        date(2027, 5, 31),
+        date(2027, 6, 18),   # Juneteenth (observado)
+        date(2027, 7, 5),    # Independencia (observado)
+        date(2027, 9, 6),
+        date(2027, 11, 25),
+        date(2027, 12, 24),  # Navidad (observado)
+    }
+)
+
+
+def is_trading_day(day: date) -> bool:
+    """Días hábiles de bolsa estadounidense: ni fin de semana ni festivo."""
+    return day.weekday() < 5 and day not in MARKET_HOLIDAYS
+
+
+# ── Parámetros de la estrategia ───────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class StrategyParams:
+    """Umbrales de los filtros y del cálculo de niveles.
+
+    Congelado (frozen) a propósito: el backtest genera variantes con
+    `replace(params, adx_min=25)` en vez de mutar un objeto compartido, lo que
+    evita que un barrido de parámetros contamine al siguiente.
+    """
+
+    # Filtro 1 — régimen alcista
+    ema_fast: int = 20
+    ema_mid: int = 50
+    ema_slow: int = 200
+
+    # Filtro 2 — fuerza de tendencia
+    adx_period: int = 14
+    adx_min: float = 20.0
+
+    # Filtro 3 — retroceso
+    pullback_lookback: int = 5          # velas en las que buscar el retroceso
+    pullback_rsi_max: float = 45.0      # el RSI tuvo que caer por debajo de esto
+    pullback_ema_touch_atr: float = 0.5  # "tocar la EMA20" = estar a < 0.5 ATR de ella
+
+    # Filtro 4 — reanudación
+    resume_rsi_min: float = 45.0        # RSI recuperando por encima de este nivel
+
+    # Filtro 5 — liquidez
+    min_dollar_volume: float = 50_000_000.0  # media de 20 sesiones, en USD
+    volume_window: int = 20
+
+    # Filtro 6 — volatilidad sana (ATR como fracción del precio)
+    atr_period: int = 14
+    min_atr_pct: float = 0.005   # por debajo: no se mueve, no llega al objetivo
+    max_atr_pct: float = 0.080   # por encima: el stop salta solo por ruido
+
+    # Niveles de la operación
+    entry_buffer_atr: float = 0.30   # techo de entrada = cierre + 0.30 ATR
+    stop_swing_lookback: int = 10
+    stop_buffer_atr: float = 0.10    # colchón bajo el mínimo, evita mechas
+    min_stop_atr: float = 0.80       # distancia mínima al stop, evita salir por ruido
+    # Objetivo de 3 ATR: junto al suelo de R:B de 1.5 admite retrocesos de hasta
+    # ~1.6 ATR de profundidad, que es el rango de un descanso sano hacia la media
+    # rápida. Con 2.5 ATR el sistema solo aceptaba retrocesos de menos de 1.3 ATR
+    # y descartaba casi todos los escenarios que la estrategia busca.
+    target_atr_mult: float = 3.00
+    min_risk_reward: float = 1.50    # descarte duro por debajo de este ratio
+
+    # El máximo reciente NO recorta el objetivo. En un retroceso dentro de una
+    # tendencia alcista siempre hay un máximo cercano por encima —el retroceso
+    # viene de ahí—, así que recortar contra él contradice la tesis de la
+    # estrategia y hunde el ratio riesgo/beneficio de forma sistemática.
+    # En su lugar, el espacio libre hasta ese techo es un componente de la
+    # puntuación: menos espacio, menos puntuación, y que sea el backtest quien
+    # decida cuánto vale esa penalización.
+    resistance_lookback: int = 60
+    headroom_target_atr: float = 3.0  # espacio libre "de sobra", en múltiplos de ATR
+
+    # Otros
+    rsi_period: int = 14
+    relative_strength_window: int = 60
+    max_signals_per_scan: int = 5    # cuántas pasan al filtro de noticias (Gemini)
+    min_score: float = 50.0          # puntuación mínima para considerar la señal
+
+    # Barras mínimas de historia para que los indicadores sean fiables.
+    @property
+    def min_bars(self) -> int:
+        return self.ema_slow + 60
+
+
+DEFAULT_PARAMS = StrategyParams()
+
+
+# ── Calibración de confianza ──────────────────────────────────────────────────
+
+# Tramos de puntuación sobre los que se mide el acierto histórico. La confianza
+# de una señal nueva es el acierto del tramo al que pertenece, corregido a la
+# baja por incertidumbre (ver risk.wilson_lower_bound).
+SCORE_BUCKETS: tuple[tuple[float, float], ...] = (
+    (50.0, 60.0),
+    (60.0, 70.0),
+    (70.0, 80.0),
+    (80.0, 100.01),
+)
+
+# Muestras mínimas para publicar la confianza de un tramo. Por debajo, la
+# corrección de Wilson ya castiga el número, pero además lo marcamos como
+# poco fiable en el mensaje.
+MIN_BUCKET_SAMPLES = 30
+
+# Confianza usada cuando todavía no existe calibration.json. Deliberadamente
+# baja y marcada como no calibrada: un bot recién instalado no ha demostrado nada.
+UNCALIBRATED_CONFIDENCE = 0.0
+
+# Penalización máxima que el filtro de noticias puede aplicar. Gemini solo resta.
+MAX_LLM_PENALTY = 25.0
+
+
+@dataclass(frozen=True)
+class BacktestParams:
+    """Ajustes del motor de backtest."""
+
+    years: int = 5
+    # Días hábiles que la orden condicional sigue viva. Si el precio no entra
+    # en la zona de compra en este plazo, la señal se descarta sin operar.
+    entry_valid_days: int = 2
+    # Días máximos en posición. Evita que una operación zombi distorsione
+    # las estadísticas durante meses.
+    max_holding_days: int = 30
+    # Coste de ida y vuelta como fracción del precio de entrada. Quantfury no
+    # cobra comisión pero opera sobre el spread; esto lo aproxima.
+    round_trip_cost: float = 0.0010
+    # Si una misma vela toca stop y objetivo, no sabemos cuál llegó primero.
+    # Contarlo como pérdida sesga el backtest en contra, que es el lado
+    # correcto en el que equivocarse.
+    ambiguous_bar_is_loss: bool = True
+
+
+DEFAULT_BACKTEST = BacktestParams()
+
+
+__all__ = [
+    "StrategyParams",
+    "BacktestParams",
+    "DEFAULT_PARAMS",
+    "DEFAULT_BACKTEST",
+    "SCORE_BUCKETS",
+    "MIN_BUCKET_SAMPLES",
+    "MAX_LLM_PENALTY",
+    "UNCALIBRATED_CONFIDENCE",
+    "is_trading_day",
+    "replace",
+]
