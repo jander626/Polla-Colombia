@@ -97,8 +97,14 @@ def test_forex_score_is_renormalized_not_penalized(uptrend_with_pullback):
     assert 0.0 <= last["score"] <= 100.0
 
 
-def test_beating_the_market_scores_higher_than_lagging_it(uptrend_with_pullback):
-    """Mismo instrumento, distinto mercado: batirlo debe puntuar más que quedarse atrás."""
+def test_relative_strength_is_measured_but_no_longer_scores(uptrend_with_pullback):
+    """La fuerza relativa se sigue midiendo, pero ya no mueve la puntuación.
+
+    El backtest mostró que puntuaba AL REVÉS: el cuartil que más había batido
+    al mercado rendía +0.002R y el que menos, +0.155R. Se le quitó el peso pero
+    se conserva el cálculo para poder vigilarla en el diagnóstico. Este test
+    fija ambas cosas: que se mide, y que no puntúa.
+    """
     df = uptrend_with_pullback
     falling_market = pd.Series(np.linspace(200.0, 100.0, len(df)), index=df.index)
     rising_market = pd.Series(np.linspace(100.0, 300.0, len(df)), index=df.index)
@@ -110,15 +116,33 @@ def test_beating_the_market_scores_higher_than_lagging_it(uptrend_with_pullback)
         df, DEFAULT_PARAMS, benchmark_close=rising_market
     ).iloc[-1]
 
+    # Se sigue midiendo, y distingue los dos escenarios.
     assert outperforming["c_relative_strength"] > lagging["c_relative_strength"]
-    assert outperforming["score"] > lagging["score"]
+    # Pero no tiene peso: la puntuación es idéntica.
+    assert outperforming["score"] == pytest.approx(lagging["score"])
+    assert "relative_strength" not in DEFAULT_PARAMS.weight_map
 
 
 def test_signal_components_are_reported(uptrend_with_pullback):
+    df = uptrend_with_pullback
+    benchmark = pd.Series(np.linspace(100.0, 160.0, len(df)), index=df.index)
+    signal = strategy.latest_signal(STOCK, df, DEFAULT_PARAMS, benchmark)
+
+    assert signal is not None
+    assert set(signal.components) <= set(strategy.ALL_COMPONENTS)
+    assert all(0.0 <= v <= 1.0 for v in signal.components.values())
+    # Los componentes SIN peso también se reportan: el diagnóstico por
+    # cuartiles los necesita para poder vigilarlos.
+    assert "relative_strength" in signal.components
+    assert "relative_strength" not in DEFAULT_PARAMS.weight_map
+
+
+def test_components_without_a_benchmark_omit_relative_strength(uptrend_with_pullback):
+    """Sin benchmark no hay fuerza relativa que medir; no se inventa un cero."""
     signal = strategy.latest_signal(STOCK, uptrend_with_pullback, DEFAULT_PARAMS)
     assert signal is not None
-    assert set(signal.components) <= set(strategy.WEIGHTS)
-    assert all(0.0 <= v <= 1.0 for v in signal.components.values())
+    assert "relative_strength" not in signal.components
+    assert "momentum_12_1" in signal.components  # este no necesita benchmark
 
 
 # ── Coherencia entre vivo y backtest ──────────────────────────────────────────
@@ -179,3 +203,67 @@ def test_scan_skips_missing_data(uptrend_with_pullback):
         DEFAULT_PARAMS,
     )
     assert [s.symbol for s in found] == ["AAPL"]
+
+
+# ── Filtro de régimen de mercado ──────────────────────────────────────────────
+
+def test_market_regime_filter_vetoes_signals_in_a_bear_market(uptrend_with_pullback):
+    """Con el índice bajo su media larga no se compra, por buena que sea la señal.
+
+    Es la defensa contra los tramos donde la reversión deja de funcionar, que
+    son los que producen la máxima caída del sistema.
+    """
+    df = uptrend_with_pullback
+    bull = pd.Series(100.0 * np.cumprod(np.full(len(df), 1.0015)), index=df.index)
+    bear = pd.Series(300.0 * np.cumprod(np.full(len(df), 0.9985)), index=df.index)
+
+    params = replace(DEFAULT_PARAMS, use_market_regime_filter=True)
+    assert strategy.latest_signal(STOCK, df, params, bull) is not None
+    assert strategy.latest_signal(STOCK, df, params, bear) is None
+
+
+def test_the_regime_filter_can_be_switched_off(uptrend_with_pullback):
+    df = uptrend_with_pullback
+    bear = pd.Series(300.0 * np.cumprod(np.full(len(df), 0.9985)), index=df.index)
+
+    off = replace(DEFAULT_PARAMS, use_market_regime_filter=False)
+    assert strategy.latest_signal(STOCK, df, off, bear) is not None
+
+
+def test_the_regime_filter_does_not_exclude_forex(uptrend_with_pullback):
+    """El S&P no es el régimen del euro-dólar; exigirlo excluiría todo el forex."""
+    params = replace(DEFAULT_PARAMS, use_market_regime_filter=True)
+    feats = strategy.compute_features(
+        uptrend_with_pullback, params, benchmark_close=None, has_volume=False
+    )
+    assert bool(feats["f_market"].iloc[-1]) is True
+
+
+# ── Variantes ─────────────────────────────────────────────────────────────────
+
+def test_the_variants_differ_from_each_other():
+    """Comparar variantes idénticas no probaría nada."""
+    from trading.config import variants
+
+    defined = variants()
+    assert len(defined) == 3
+    signatures = {
+        (p.use_market_regime_filter, tuple(sorted(p.weight_map)))
+        for p in defined.values()
+    }
+    assert len(signatures) == 3
+
+
+def test_no_variant_gives_weight_to_the_inverted_component():
+    """Ninguna variante puede reintroducir el componente que puntuaba al revés."""
+    from trading.config import variants
+
+    for name, params in variants().items():
+        assert "relative_strength" not in params.weight_map, name
+
+
+def test_variant_weights_are_normalised():
+    from trading.config import variants
+
+    for name, params in variants().items():
+        assert sum(params.weight_map.values()) == pytest.approx(1.0), name

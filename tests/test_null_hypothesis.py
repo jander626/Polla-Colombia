@@ -31,7 +31,7 @@ SYMBOLS = [
 ]
 
 
-def random_walk(seed: int, n: int = 1400, drift: float = 0.0) -> pd.DataFrame:
+def random_walk(seed: int, n: int = 1600, drift: float = 0.0) -> pd.DataFrame:
     """Paseo aleatorio geométrico sin ninguna estructura explotable."""
     rng = np.random.default_rng(seed)
     vol = rng.uniform(0.009, 0.018)

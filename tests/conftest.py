@@ -47,16 +47,22 @@ def uptrend_with_pullback() -> pd.DataFrame:
     """
     rng = np.random.default_rng(7)
 
-    # Tramo 1: 300 velas de subida sostenida con ruido pequeño.
-    trend = 100.0 * np.cumprod(1.0 + rng.normal(0.0018, 0.006, 300))
+    # Tramo 1: subida sostenida con ruido pequeño. Son 400 velas y no 300
+    # porque el momentum a 12 meses exige 273 sesiones de historia antes
+    # de dar su primer valor.
+    trend = 100.0 * np.cumprod(1.0 + rng.normal(0.0018, 0.006, 400))
 
-    # Tramo 2: retroceso de ~6% en 6 velas — enfría el RSI y acerca el precio
+    # Tramo 2: retroceso de ~4% en 5 velas — enfría el RSI y acerca el precio
     # a la EMA20 sin romper la tendencia de fondo.
     last = trend[-1]
-    pullback = last * np.cumprod(np.full(6, 1.0 - 0.010))
+    pullback = last * np.cumprod(np.full(5, 1.0 - 0.008))
 
-    # Tramo 3: dos velas de reanudación con cierre fuerte.
-    resume = pullback[-1] * np.cumprod([1.012, 1.015])
+    # Tramo 3: dos velas de reanudación contenidas. La magnitud importa y no
+    # es arbitraria: cuanto más fuerte rebota el precio antes de la señal, más
+    # arriba queda la entrada y peor sale el ratio riesgo/beneficio, porque se
+    # compra más lejos del stop. Con este rebote el R:B queda en ~1.68, con
+    # holgura sobre el mínimo de 1.5 para que el test no sea frágil.
+    resume = pullback[-1] * np.cumprod([1.010, 1.018])
 
     closes = np.concatenate([trend, pullback, resume])
     # El volumen de la vela de reanudación destaca sobre la media.
@@ -67,9 +73,19 @@ def uptrend_with_pullback() -> pd.DataFrame:
 
 @pytest.fixture
 def sideways() -> pd.DataFrame:
-    """Mercado lateral: la estrategia NO debe generar señales aquí."""
+    """Mercado lateral: la estrategia NO debe generar señales aquí.
+
+    Se genera con reversión a la media en lugar de un paseo aleatorio: un
+    paseo aleatorio largo deriva y acaba pareciendo una tendencia, que es
+    justo lo contrario de lo que este escenario debe representar.
+    """
     rng = np.random.default_rng(11)
-    closes = 100.0 + np.cumsum(rng.normal(0.0, 0.4, 320))
+    level, pull = 100.0, 0.08
+    closes = np.empty(420)
+    price = level
+    for i in range(420):
+        price += pull * (level - price) + rng.normal(0.0, 1.0)
+        closes[i] = price
     return make_bars(closes)
 
 
@@ -77,5 +93,5 @@ def sideways() -> pd.DataFrame:
 def downtrend() -> pd.DataFrame:
     """Tendencia bajista sostenida: tampoco debe generar compras."""
     rng = np.random.default_rng(13)
-    closes = 200.0 * np.cumprod(1.0 + rng.normal(-0.002, 0.006, 320))
+    closes = 200.0 * np.cumprod(1.0 + rng.normal(-0.002, 0.006, 420))
     return make_bars(closes)

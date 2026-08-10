@@ -327,6 +327,75 @@ class BacktestReport:
         )
         return "\n".join(lines)
 
+    def out_of_sample_split(self, train_fraction: float = 0.6) -> str:
+        """Divide las operaciones por fecha y compara las dos mitades.
+
+        Es la defensa contra el autoengaño. Estamos ajustando la estrategia
+        sobre la misma muestra con la que la medimos, así que cualquier mejora
+        está en parte inflada. Una ventaja que aparece en el primer tramo y
+        desaparece en el segundo no es una ventaja: es un ajuste a los datos.
+
+        No es una validación fuera de muestra estricta —los parámetros se
+        eligieron viendo el conjunto entero—, pero detecta el caso más común y
+        más caro: que todo el resultado venga de un periodo concreto.
+        """
+        filled = sorted(
+            (t for t in self.filled if np.isfinite(t.r_multiple)),
+            key=lambda t: t.signal_date,
+        )
+        if len(filled) < 60:
+            return "Muestra insuficiente para partir en dos."
+
+        cut = int(len(filled) * train_fraction)
+        first, second = filled[:cut], filled[cut:]
+
+        def describe(name: str, trades: list[Trade]) -> str:
+            r = np.array([t.r_multiple for t in trades])
+            wins = sum(1 for t in trades if t.is_win)
+            se = r.std(ddof=1) / np.sqrt(len(r)) if len(r) > 1 else float("nan")
+            lower = r.mean() - 1.96 * se
+            return (
+                f"  {name:<12} {trades[0].signal_date:%Y-%m}→{trades[-1].signal_date:%Y-%m}  "
+                f"{len(trades):>4} ops  {100 * wins / len(trades):>5.1f}% aciertos  "
+                f"R medio {r.mean():>+7.3f}  R mínimo {lower:>+7.3f}"
+            )
+
+        lines = [describe("Primer tramo", first), describe("Segundo tramo", second)]
+
+        r1 = np.array([t.r_multiple for t in first]).mean()
+        r2 = np.array([t.r_multiple for t in second]).mean()
+        if r1 > 0 and r2 > 0:
+            lines.append("\n  ✓ La ventaja aparece en los dos tramos.")
+        elif r2 <= 0 < r1:
+            lines.append(
+                "\n  ✗ La ventaja solo está en el primer tramo y desaparece en el\n"
+                "    segundo. Eso apunta a ajuste a los datos, o a que el efecto\n"
+                "    dejó de funcionar. No conviene operarlo."
+            )
+        elif r1 <= 0 < r2:
+            lines.append(
+                "\n  ~ Solo hay ventaja en el tramo reciente. Puede ser una mejora\n"
+                "    real del régimen de mercado, o casualidad; hace falta más muestra."
+            )
+        else:
+            lines.append("\n  ✗ Sin ventaja en ninguno de los dos tramos.")
+        return "\n".join(lines)
+
+    def headline(self) -> dict:
+        """Métricas comparables entre variantes."""
+        filled = [t for t in self.filled if np.isfinite(t.r_multiple)]
+        if not filled:
+            return {"ops": 0, "win_rate": 0.0, "avg_r": 0.0, "lower_r": 0.0, "max_dd": 0.0}
+        r = np.array([t.r_multiple for t in filled])
+        se = r.std(ddof=1) / np.sqrt(len(r)) if len(r) > 1 else float("nan")
+        return {
+            "ops": len(filled),
+            "win_rate": len(self.wins) / len(filled),
+            "avg_r": float(r.mean()),
+            "lower_r": float(r.mean() - 1.96 * se),
+            "max_dd": self.max_drawdown_r,
+        }
+
     def score_distribution(self) -> str:
         """Cuántas señales caen en cada tramo de puntuación.
 
@@ -420,3 +489,43 @@ def run_backtest(
         "tómalo como cota superior."
     )
     return report
+
+
+# ── Comparación de variantes ──────────────────────────────────────────────────
+
+def compare_variants(
+    named_params: dict[str, StrategyParams],
+    instruments: list[Instrument],
+    bars: dict[str, pd.DataFrame],
+    bt: BacktestParams,
+    benchmark_close: Optional[pd.Series] = None,
+) -> tuple[str, dict[str, BacktestReport]]:
+    """Mide varias variantes sobre los mismos datos y las publica TODAS.
+
+    Reportar solo la ganadora sería hacer trampa: con suficientes intentos,
+    alguna variante siempre parece buena por azar. Ver las tres juntas, con su
+    límite inferior y su partición temporal, permite distinguir una mejora real
+    de una casualidad afortunada.
+    """
+    reports: dict[str, BacktestReport] = {}
+    for name, params in named_params.items():
+        print(f"[INFO] Midiendo variante {name}…")
+        reports[name] = run_backtest(instruments, bars, params, bt, benchmark_close)
+
+    lines = [
+        f"{'Variante':<26} {'Ops':>6} {'Acierto':>9} {'R medio':>9} "
+        f"{'R mínimo':>9} {'Caída máx':>10}",
+    ]
+    for name, report in reports.items():
+        h = report.headline()
+        lines.append(
+            f"{name:<26} {h['ops']:>6} {100 * h['win_rate']:>8.1f}% "
+            f"{h['avg_r']:>+9.3f} {h['lower_r']:>+9.3f} {h['max_dd']:>9.1f}R"
+        )
+
+    lines.append(
+        "\n  'R mínimo' es la ventaja que sobrevive a su propia incertidumbre.\n"
+        "  Si es negativo, la variante NO ha demostrado nada, por buena que\n"
+        "  parezca su media. Es la única columna que decide."
+    )
+    return "\n".join(lines), reports

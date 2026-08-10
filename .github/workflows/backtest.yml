@@ -14,6 +14,10 @@ on:
         description: "Guardar calibration.json en la rama (true/false)"
         required: false
         default: "true"
+      compare:
+        description: "Comparar las variantes en vez de calibrar (true/false)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write  # para commitear calibration.json
@@ -55,9 +59,11 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           YEARS: ${{ github.event.inputs.years || '5' }}
           WRITE: ${{ github.event.inputs.write || 'true' }}
+          COMPARE: ${{ github.event.inputs.compare || 'false' }}
         run: |
           set -o pipefail
           args=(backtest --years "$YEARS")
+          [ "$COMPARE" = "true" ] && args+=(--compare)
           [ "$WRITE" = "false" ] || args+=(--write)
           python trading_bot.py "${args[@]}" 2>&1 | tee backtest_output.txt
 

@@ -33,18 +33,26 @@ from .risk import Levels, compute_levels
 from .universe import Instrument
 
 
-# Pesos del scoring. Para forex no hay volumen centralizado ni un benchmark
-# comparable, así que esos componentes se marcan como no disponibles y el peso
-# se reparte entre el resto en lugar de puntuar cero (que penalizaría a todo el
-# forex frente a las acciones sin ninguna razón).
-WEIGHTS = {
-    "trend": 0.22,
-    "pullback": 0.18,
-    "momentum": 0.18,
-    "headroom": 0.15,
-    "relative_strength": 0.15,
-    "volume": 0.12,
-}
+# Componentes que se calculan siempre. Los que puntúan y con qué peso lo
+# decide `StrategyParams.weights`, para que el backtest pueda comparar
+# variantes sin tocar esta lógica.
+#
+# Para forex no hay volumen centralizado ni un benchmark comparable, así que
+# esos componentes se marcan como no disponibles y su peso se reparte entre el
+# resto, en lugar de puntuar cero (lo que penalizaría a todo el forex sin
+# ninguna razón).
+ALL_COMPONENTS = (
+    "trend",
+    "pullback",
+    "momentum",
+    "headroom",
+    "volume",
+    "momentum_12_1",
+    "reversal",
+    # Se sigue calculando pero ya no puntúa: la primera medición mostró que
+    # puntuaba al revés. Se conserva para poder vigilarlo en el diagnóstico.
+    "relative_strength",
+)
 
 
 @dataclass(frozen=True)
@@ -107,12 +115,27 @@ def compute_features(
         out["dollar_volume"] = np.nan
         out["avg_volume"] = np.nan
 
+    out["momentum_12_1"] = ind.momentum_12_1(
+        close, params.momentum_window, params.momentum_skip
+    )
+    out["reversal"] = ind.short_term_reversal(close, params.reversal_window)
+
     if benchmark_close is not None:
         out["rel_strength"] = ind.relative_strength(
             close, benchmark_close, params.relative_strength_window
         )
+        # Régimen de mercado: solo se compra con el índice sobre su media
+        # larga. Es la forma más barata de evitar los tramos donde la reversión
+        # deja de funcionar, que son los que producen la máxima caída.
+        benchmark = benchmark_close.reindex(out.index)
+        out["market_ok"] = ind.above_moving_average(
+            benchmark, params.market_regime_ma
+        ).fillna(False)
     else:
         out["rel_strength"] = np.nan
+        # Sin benchmark (forex) no hay régimen que filtrar: el S&P no es su
+        # régimen, y exigirlo excluiría todo el forex sin fundamento.
+        out["market_ok"] = True
 
     out["swing_low"] = ind.rolling_low(low, params.stop_swing_lookback)
     out["resistance"] = ind.rolling_high(high, params.resistance_lookback)
@@ -165,8 +188,14 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
         out["atr_pct"] <= params.max_atr_pct
     )
 
+    if params.use_market_regime_filter:
+        out["f_market"] = out["market_ok"].astype(bool)
+    else:
+        out["f_market"] = True
+
     out["passes"] = (
-        out["f_regime"].fillna(False)
+        out["f_market"]
+        & out["f_regime"].fillna(False)
         & out["f_trend_strength"].fillna(False)
         & out["f_pullback"].fillna(False)
         & out["f_resume"].fillna(False)
@@ -212,7 +241,16 @@ def _add_score(
     headroom_atr = (out["resistance"] - out["close"]) / out["atr"].replace(0.0, np.nan)
     out["c_headroom"] = _clip01(headroom_atr / params.headroom_target_atr)
 
-    # Fuerza relativa frente al mercado.
+    # Momentum 12-1 (Jegadeesh y Titman). Se normaliza sobre un rango de
+    # -20% a +60%, que cubre lo que hace una acción líquida en un año.
+    out["c_momentum_12_1"] = _clip01((out["momentum_12_1"] + 0.20) / 0.80)
+
+    # Reversión a corto plazo: ya viene invertida, así que un valor alto
+    # significa "se quedó atrás el último mes", que es lo que se premia.
+    out["c_reversal"] = _clip01((out["reversal"] + 0.10) / 0.20)
+
+    # Fuerza relativa frente al mercado. YA NO PUNTÚA —su peso es cero— pero se
+    # sigue calculando para vigilarla en el diagnóstico por cuartiles.
     out["c_relative_strength"] = (
         _clip01((out["rel_strength"] + 0.05) / 0.20) if has_benchmark else np.nan
     )
@@ -228,7 +266,7 @@ def _add_score(
     # el forex no quede penalizado por carecer de volumen y benchmark.
     total = pd.Series(0.0, index=out.index)
     weight_sum = pd.Series(0.0, index=out.index)
-    for key, weight in WEIGHTS.items():
+    for key, weight in params.weight_map.items():
         column = out[f"c_{key}"]
         available = column.notna()
         total += column.fillna(0.0) * weight * available
@@ -259,7 +297,7 @@ def _build_signal(
 
     components = {
         key: float(row[f"c_{key}"])
-        for key in WEIGHTS
+        for key in ALL_COMPONENTS
         if pd.notna(row.get(f"c_{key}", np.nan))
     }
 
