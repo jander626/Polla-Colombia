@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-08-10T03:48:46+00:00",
+  "total_signals": 549,
+  "notes": "Sesgo de supervivencia: el universo son los instrumentos líquidos de hoy, así que el resultado histórico sale mejor de lo que habría sido en vivo. | No incluye slippage real ni el riesgo de no colocar la orden a tiempo; tómalo como cota superior.",
+  "buckets": [
+    {
+      "low": 50.0,
+      "high": 60.0,
+      "samples": 345,
+      "wins": 122,
+      "win_rate": 0.3536,
+      "confidence": 30.5,
+      "reliable": true
+    },
+    {
+      "low": 60.0,
+      "high": 70.0,
+      "samples": 175,
+      "wins": 57,
+      "win_rate": 0.3257,
+      "confidence": 26.07,
+      "reliable": true
+    },
+    {
+      "low": 70.0,
+      "high": 80.0,
+      "samples": 29,
+      "wins": 14,
+      "win_rate": 0.4828,
+      "confidence": 31.39,
+      "reliable": false
+    },
+    {
+      "low": 80.0,
+      "high": 100.01,
+      "samples": 0,
+      "wins": 0,
+      "win_rate": 0.0,
+      "confidence": 0.0,
+      "reliable": false
+    }
+  ]
+}
