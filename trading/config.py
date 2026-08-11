@@ -35,13 +35,29 @@ NY_TZ = ZoneInfo("America/New_York")
 LONDON_TZ = ZoneInfo("Europe/London")
 BOGOTA_TZ = ZoneInfo("America/Bogota")  # zona del usuario, solo para mostrar horas
 
-# El escaneo se lanza antes de la apertura de EE.UU. El cron de GitHub Actions
-# es en UTC y se retrasa bajo carga, así que dispara cada 15 minutos dentro de
-# una ventana y es este módulo — con zonas horarias reales — el que decide si
-# toca ejecutar. Así el horario de verano deja de ser un problema.
-SCAN_HOUR_NY = 8
-SCAN_MINUTE_NY = 30
-SCAN_WINDOW_MINUTES = 90  # margen para absorber retrasos del cron
+# Ventana de escaneo, en hora de Nueva York.
+#
+# El cron de GitHub Actions es en UTC y —esto es lo importante— NO se respeta:
+# está programado cada 15 minutos y en la práctica dispara dos o tres veces al
+# día, a horas impredecibles. Por eso la decisión de escanear se toma aquí, con
+# zonas horarias reales, y no en el cron.
+#
+# La ventana empezaba a las 08:30 y duraba 90 minutos. El 11 de agosto de 2026
+# el bot no alertó en todo el día: sus dos únicas ejecuciones cayeron a las
+# 07:38 y a las 08:27 de Nueva York — la segunda por DOS MINUTOS fuera.
+#
+# El fallo era de criterio. La señal se calcula con el CIERRE DE AYER, que no
+# cambia entre las 06:00 y las 09:00 de la mañana: escanear a las 07:38 habría
+# dado exactamente el mismo resultado. Aquella hora de inicio era una
+# preferencia, no una necesidad, y estaba rechazando escaneos perfectamente
+# válidos.
+#
+# El único límite real es el otro extremo: no alertar con el mercado ya
+# abierto, porque entonces el precio de entrada calculado ya no sirve. De ahí
+# que la ventana termine a las 09:25, cinco minutos antes de la apertura.
+SCAN_HOUR_NY = 6
+SCAN_MINUTE_NY = 0
+SCAN_WINDOW_MINUTES = 205  # 06:00 → 09:25, cinco minutos antes de la apertura
 
 # Festivos de NYSE/NASDAQ. Lista estática porque son ~10 al año y la
 # alternativa (pandas_market_calendars) arrastra dependencias pesadas para

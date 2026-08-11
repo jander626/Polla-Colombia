@@ -1,16 +1,17 @@
 name: Bot de señales de trading
 
 on:
-  # El cron dispara a menudo dentro de una ventana amplia; quien decide si
-  # toca escanear es trading/schedule.py, con zonas horarias reales. El cron
-  # de Actions se retrasa bajo carga y además es UTC, así que las 08:30 de
-  # Nueva York se mueven una hora con el horario de verano. Delegar la
-  # decisión en Python resuelve las dos cosas.
+  # GitHub no respeta este cron: pide cada 15 minutos y dispara dos o tres
+  # veces al día, a horas impredecibles. Por eso la ventana de escaneo que
+  # decide trading/schedule.py es ancha (06:00–09:25 de Nueva York): con una
+  # banda de tres horas y media, cualquier disparo que GitHub conceda cae
+  # dentro. Con la ventana estrecha anterior hacían falta dos coincidencias
+  # afortunadas seguidas, y el 11 de agosto no hubo ninguna.
   #
-  # 11:00–14:00 UTC cubre las 08:30 de Nueva York tanto en horario de verano
-  # (12:30 UTC) como de invierno (13:30 UTC), con margen para los retrasos.
+  # 10:00–14:00 UTC cubre esa ventana en verano (10:00–13:25 UTC) y en
+  # invierno (11:00–14:25 UTC).
   schedule:
-    - cron: "*/15 11-14 * * 1-5"
+    - cron: "*/15 10-14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
