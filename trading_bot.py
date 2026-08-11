@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -68,27 +69,55 @@ def _load_bars(
 
 # ── Escaneo ───────────────────────────────────────────────────────────────────
 
-def _deliver_signals(
+@dataclass
+class Delivery:
+    """Lo que el escaneo va a enviar de verdad, y qué descartó por el camino.
+
+    Existe porque la cabecera se enviaba ANTES de decidir qué se entregaba: el
+    11 de agosto anunció "Oportunidades detectadas: 1" y no mandó ninguna
+    señal, porque la única encontrada era un instrumento ya abierto. Desde el
+    lado del usuario eso es indistinguible de un bot roto.
+
+    Ahora se decide todo primero y se comunica después, incluidos los motivos
+    de descarte: un silencio sin explicación es peor que una mala noticia.
+    """
+
+    total_found: int = 0
+    messages: list[tuple[Signal, str, float]] = field(default_factory=list)
+    already_open: list[str] = field(default_factory=list)
+    event_risk: list[str] = field(default_factory=list)
+    over_cap: int = 0
+
+    @property
+    def has_messages(self) -> bool:
+        return bool(self.messages)
+
+
+def _prepare_delivery(
     signals: list[Signal],
     state: TradingState,
     calibration: Calibration,
-    client: notify.TelegramClient,
     params: StrategyParams,
-    dry_run: bool,
     use_llm: bool,
-    stale_calibration: bool = False,
-) -> int:
-    """Verifica, formatea y envía. Devuelve cuántas señales se entregaron."""
+    stale_calibration: bool,
+) -> Delivery:
+    """Decide qué se envía y por qué se descarta el resto. No envía nada."""
+    delivery = Delivery(total_found=len(signals))
+
     # No se repite una señal sobre un instrumento que ya tiene operación
     # abierta: duplicaría la exposición sin que el usuario lo haya decidido.
     busy = state.open_symbols()
-    candidates = [s for s in signals if s.symbol not in busy][
-        : params.max_signals_per_scan
-    ]
-    if not candidates:
-        return 0
+    available = []
+    for signal in signals:
+        if signal.symbol in busy:
+            delivery.already_open.append(signal.symbol)
+        else:
+            available.append(signal)
 
-    delivered = 0
+    if len(available) > params.max_signals_per_scan:
+        delivery.over_cap = len(available) - params.max_signals_per_scan
+    candidates = available[: params.max_signals_per_scan]
+
     for signal in candidates:
         stats = calibration.for_asset_class(signal.asset_class)
         confidence = stats.win_rate_lower if stats else 0.0
@@ -97,11 +126,49 @@ def _deliver_signals(
         if risk is not None:
             if risk.is_blocking:
                 print(f"[INFO] {signal.symbol} descartada: riesgo de evento alto")
+                delivery.event_risk.append(signal.symbol)
                 continue
             confidence = apply_llm_penalty(confidence, risk.penalty, MAX_LLM_PENALTY)
 
         message = notify.format_signal(signal, calibration, risk, stale_calibration)
+        delivery.messages.append((signal, message, confidence))
 
+    return delivery
+
+
+def _send_delivery(
+    delivery: Delivery,
+    state: TradingState,
+    client: notify.TelegramClient,
+    dry_run: bool,
+) -> int:
+    """Envía cabecera y señales. La cabecera ya sabe cuántas van a salir."""
+    if not delivery.has_messages:
+        # Se encontró algo pero no se envía nada: explicar por qué. Callar aquí
+        # es lo que hacía que el bot pareciera averiado.
+        text = notify.format_all_filtered(
+            delivery.total_found, delivery.already_open, delivery.event_risk
+        )
+        print(f"[INFO] Nada que entregar: {text.splitlines()[-1][:120]}")
+        if not dry_run:
+            client.broadcast(text, state.chat_ids)
+        else:
+            print(text)
+        return 0
+
+    header = notify.format_scan_header(
+        delivery.total_found,
+        len(delivery.messages),
+        already_open=delivery.already_open,
+        event_risk=delivery.event_risk,
+    )
+    if dry_run:
+        print(header)
+    else:
+        client.broadcast(header, state.chat_ids)
+
+    delivered = 0
+    for signal, message, confidence in delivery.messages:
         if dry_run:
             print(message)
             print("-" * 55)
@@ -169,16 +236,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 0
 
     print(f"[INFO] Señales detectadas: {len(signals)}")
-    if not args.dry_run:
-        shown = min(len(signals), params.max_signals_per_scan)
-        client.broadcast(
-            notify.format_scan_header(len(signals), shown), state.chat_ids
-        )
-
-    delivered = _deliver_signals(
-        signals, state, calibration, client, params,
-        dry_run=args.dry_run, use_llm=not args.no_llm, stale_calibration=stale,
+    delivery = _prepare_delivery(
+        signals, state, calibration, params,
+        use_llm=not args.no_llm, stale_calibration=stale,
     )
+    delivered = _send_delivery(delivery, state, client, dry_run=args.dry_run)
     print(f"[INFO] Señales entregadas: {delivered}")
 
     if not args.dry_run:
