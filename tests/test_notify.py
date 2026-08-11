@@ -19,10 +19,12 @@ from trading.llm_filter import EventRisk
 from trading.notify import (
     TELEGRAM_MAX_LEN,
     _split_message,
+    format_all_filtered,
     format_help,
     format_no_signals,
     format_outcome,
     format_performance,
+    format_scan_header,
     format_signal,
     sanitize,
 )
@@ -268,3 +270,49 @@ def test_a_stale_calibration_is_announced():
 
     assert "versión anterior" in stale
     assert "versión anterior" not in fresh
+
+
+# ── El escaneo mudo del 11 de agosto ─────────────────────────────────────────
+
+def test_the_header_reports_what_will_actually_be_sent():
+    """Anunciaba lo encontrado, no lo que iba a enviar.
+
+    Ese día detectó 1 oportunidad, la descartó por tener ya la posición
+    abierta, y la cabecera igual dijo "1". Después, silencio.
+    """
+    header = format_scan_header(3, 1, already_open=["ABBV"], event_risk=["NVDA"])
+    assert "detectadas: *3*" in header
+    assert "Se envían: *1*" in header
+    assert "ABBV" in header and "posición abierta" in header
+    assert "NVDA" in header and "riesgo de evento" in header
+
+
+def test_the_header_stays_simple_when_nothing_is_discarded():
+    header = format_scan_header(2, 2)
+    assert "Descartadas" not in header
+    assert "Se envían" not in header
+
+
+def test_a_fully_filtered_scan_explains_itself():
+    """El caso exacto que dejó al usuario sin saber si el bot estaba roto."""
+    message = format_all_filtered(1, already_open=["ABBV"], event_risk=[])
+
+    assert "ninguna se envía" in message
+    assert "ABBV" in message
+    assert "posición abierta" in message
+    # Y explica el porqué de la regla, no solo el hecho.
+    assert "duplicaría tu exposición" in message
+
+
+def test_a_fully_filtered_scan_by_event_risk():
+    message = format_all_filtered(2, already_open=[], event_risk=["NVDA", "AAPL"])
+    assert "NVDA" in message and "AAPL" in message
+    assert "riesgo de evento" in message
+    assert "duplicaría" not in message      # ese motivo no aplica aquí
+
+
+def test_a_fully_filtered_scan_without_a_known_reason():
+    """Aun sin motivo identificable, hay que decir que no se envía nada."""
+    message = format_all_filtered(1, already_open=[], event_risk=[])
+    assert "ninguna se envía" in message
+    assert "Sin candidatos" in message

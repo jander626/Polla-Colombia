@@ -232,13 +232,71 @@ def format_signal(
     return "\n".join(lines)
 
 
-def format_scan_header(count: int, shown: int) -> str:
-    return (
-        "📡 *ESCANEO DIARIO*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"Oportunidades detectadas: *{count}*"
-        + (f" (se envían las {shown} mejores)" if shown < count else "")
-    )
+def _reasons(already_open: list[str], event_risk: list[str]) -> list[str]:
+    lines = []
+    if already_open:
+        lines.append(
+            f"• {', '.join(already_open)}: ya tienes la posición abierta"
+        )
+    if event_risk:
+        lines.append(
+            f"• {', '.join(event_risk)}: riesgo de evento alto (resultados o dato macro)"
+        )
+    return lines
+
+
+def format_scan_header(
+    count: int,
+    shown: int,
+    already_open: Optional[list[str]] = None,
+    event_risk: Optional[list[str]] = None,
+) -> str:
+    """Cabecera del escaneo, con los descartes explicados.
+
+    `shown` es lo que se va a enviar DE VERDAD, no lo que se encontró. La
+    diferencia importa: el 11 de agosto la cabecera anunció una oportunidad,
+    el único candidato quedó descartado por tener ya la posición abierta, y no
+    llegó ninguna señal ni ninguna explicación.
+    """
+    lines = [
+        "📡 *ESCANEO DIARIO*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Oportunidades detectadas: *{count}*",
+    ]
+    if shown < count:
+        lines.append(f"Se envían: *{shown}*")
+
+    reasons = _reasons(already_open or [], event_risk or [])
+    if reasons:
+        lines += ["", "_Descartadas:_"] + reasons
+    return "\n".join(lines)
+
+
+def format_all_filtered(
+    count: int, already_open: list[str], event_risk: list[str]
+) -> str:
+    """Se encontró algo pero no se envía nada. Hay que decir por qué.
+
+    Un silencio sin explicación es indistinguible de un bot averiado, y eso
+    fue exactamente lo que ocurrió el 11 de agosto.
+    """
+    lines = [
+        "📡 *ESCANEO DIARIO*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Se detectaron *{count}* oportunidades, pero ninguna se envía.",
+        "",
+        "_Motivo:_",
+    ]
+    reasons = _reasons(already_open, event_risk)
+    lines += reasons or ["• Sin candidatos que superen los filtros de entrega."]
+
+    if already_open:
+        lines += [
+            "",
+            "_No se repite una señal sobre un instrumento que ya tienes "
+            "abierto: duplicaría tu exposición sin que tú lo hayas decidido._",
+        ]
+    return "\n".join(lines)
 
 
 def format_no_signals() -> str:

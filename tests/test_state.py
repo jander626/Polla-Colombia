@@ -243,3 +243,66 @@ def test_state_json_never_contains_nan(tmp_path):
     raw = path and open(path, encoding="utf-8").read()
     assert "NaN" not in raw and "Infinity" not in raw
     json.loads(raw)  # debe poder releerse
+
+
+# ── Preparación de la entrega (trading_bot) ──────────────────────────────────
+
+def test_an_open_symbol_is_not_alerted_again():
+    """Repetir una señal sobre lo que ya tienes abierto duplicaría exposición."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import trading_bot
+    from trading.risk import Calibration
+    from trading.strategy import Signal
+    from trading.config import DEFAULT_PARAMS
+
+    instrument = universe.get("AAPL")
+    signal = Signal(
+        symbol="AAPL", name=instrument.name, asset_class="stock",
+        bar_date=pd.Timestamp("2026-08-10"), close=99.0, atr=5.0, atr_pct=0.05,
+        score=72.0, levels=Levels(100.0, 95.0, 115.0, 3.0, 5.0, 15.0),
+    )
+
+    state = TradingState()
+    state.open_signals.append({**make_record("AAPL")})
+
+    delivery = trading_bot._prepare_delivery(
+        [signal], state, Calibration.empty(), DEFAULT_PARAMS,
+        use_llm=False, stale_calibration=False,
+    )
+
+    assert delivery.total_found == 1
+    assert not delivery.has_messages          # no se envía
+    assert delivery.already_open == ["AAPL"]  # y se sabe por qué
+
+
+def test_a_free_symbol_is_prepared_for_delivery():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import trading_bot
+    from trading.risk import Calibration
+    from trading.strategy import Signal
+    from trading.config import DEFAULT_PARAMS
+
+    instrument = universe.get("MSFT")
+    signal = Signal(
+        symbol="MSFT", name=instrument.name, asset_class="stock",
+        bar_date=pd.Timestamp("2026-08-10"), close=99.0, atr=5.0, atr_pct=0.05,
+        score=72.0, levels=Levels(100.0, 95.0, 115.0, 3.0, 5.0, 15.0),
+    )
+
+    state = TradingState()
+    state.open_signals.append({**make_record("AAPL")})   # otra posición abierta
+
+    delivery = trading_bot._prepare_delivery(
+        [signal], state, Calibration.empty(), DEFAULT_PARAMS,
+        use_llm=False, stale_calibration=False,
+    )
+
+    assert delivery.has_messages
+    assert delivery.already_open == []
+    assert delivery.messages[0][0].symbol == "MSFT"
