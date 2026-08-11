@@ -1,9 +1,11 @@
 """Tests de la ventana horaria.
 
-El horario de verano y los retrasos del cron son las dos formas silenciosas de
-que el bot alerte a destiempo. Estos tests fijan ambas: que las 08:30 de Nueva
-York se respeten en junio y en enero pese a que el UTC cambie, y que una
-alerta fuera de plazo no llegue a enviarse.
+Dos formas silenciosas de que el bot falle, y las dos han ocurrido:
+
+1. El horario de verano mueve la hora de Nueva York respecto al UTC del cron.
+2. GitHub no respeta el cron. Pide cada 15 minutos y concede dos o tres
+   disparos al día, a horas impredecibles — de ahí que la ventana tenga que
+   ser ancha, y que su anchura se verifique contra el cron real del workflow.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ def test_scans_inside_the_window():
 
 
 def test_does_not_scan_before_the_window():
-    allowed, reason = should_scan(ny(2026, 8, 12, 7, 0))
+    allowed, reason = should_scan(ny(2026, 8, 12, 5, 0))
     assert not allowed and "pronto" in reason
 
 
@@ -39,10 +41,17 @@ def test_does_not_scan_after_the_window():
     assert not allowed and "ventana perdida" in reason
 
 
-def test_window_starts_at_0830_new_york():
+def test_the_window_ends_before_the_opening_bell():
+    """El único límite real: no alertar con el mercado ya abierto.
+
+    Con el mercado abierto el precio de entrada calculado sobre el cierre de
+    ayer deja de servir. La hora de INICIO, en cambio, es holgada a propósito:
+    la señal sale del cierre anterior y no cambia durante toda la mañana.
+    """
     start, end = scan_window(date(2026, 8, 12))
-    assert (start.hour, start.minute) == (8, 30)
+    assert (end.hour, end.minute) == (9, 25)      # 5 min antes de la apertura
     assert end > start
+    assert (end - start).total_seconds() / 3600 > 3   # banda ancha, no 90 min
 
 
 # ── Horario de verano ─────────────────────────────────────────────────────────
@@ -50,8 +59,8 @@ def test_window_starts_at_0830_new_york():
 @pytest.mark.parametrize(
     "day,expected_utc_hour",
     [
-        (date(2026, 8, 12), 12),  # verano: EDT = UTC-4 -> 08:30 NY = 12:30 UTC
-        (date(2026, 1, 14), 13),  # invierno: EST = UTC-5 -> 08:30 NY = 13:30 UTC
+        (date(2026, 8, 12), 10),  # verano: EDT = UTC-4 -> 06:00 NY = 10:00 UTC
+        (date(2026, 1, 14), 11),  # invierno: EST = UTC-5 -> 06:00 NY = 11:00 UTC
     ],
 )
 def test_the_window_follows_daylight_saving(day, expected_utc_hour):
@@ -85,7 +94,7 @@ def _workflow_cron_hours() -> set[int]:
 def test_the_cron_fires_inside_the_window_all_year(day):
     """Verano e invierno: el cron debe dispararse dentro de la ventana.
 
-    En verano la ventana cae en 12:30–14:00 UTC y en invierno en 13:30–15:00.
+    En verano la ventana cae en 10:00–13:25 UTC y en invierno en 11:00–14:25.
     Un cron que solo cubriera una de las dos dejaría al bot mudo medio año.
     """
     start, end = scan_window(day)
@@ -103,8 +112,10 @@ def test_the_cron_fires_inside_the_window_all_year(day):
         f"el cron ({sorted(cron_hours)} UTC) no dispara nunca dentro de la "
         f"ventana {start:%H:%M}–{end:%H:%M} UTC del {day}"
     )
-    # Con margen de sobra para absorber los retrasos del cron de Actions.
-    assert len(inside) >= 4
+    # Margen amplio a propósito. GitHub concede dos o tres disparos al día de
+    # los que se le piden, así que la ventana debe ser lo bastante ancha para
+    # que cualquiera de ellos caiga dentro.
+    assert len(inside) >= 12
 
 
 # ── Días no hábiles ───────────────────────────────────────────────────────────
@@ -149,3 +160,26 @@ def test_previous_trading_day_skips_the_weekend():
 def test_previous_trading_day_skips_holidays():
     # 2026-12-25 es Navidad (viernes); el hábil anterior es el jueves 24.
     assert previous_trading_day(date(2026, 12, 28)) == date(2026, 12, 24)
+
+
+# ── El incidente del 11 de agosto de 2026 ────────────────────────────────────
+
+@pytest.mark.parametrize("hour,minute", [(7, 38), (8, 27)])
+def test_the_two_runs_that_missed_the_window_now_scan(hour, minute):
+    """Ese día el bot no alertó: sus dos ejecuciones cayeron fuera por poco.
+
+    GitHub solo le concedió dos disparos, a las 07:38 y a las 08:27 de Nueva
+    York. La ventana empezaba a las 08:30, así que el segundo se quedó fuera
+    por DOS MINUTOS y no hubo escaneo en todo el día.
+
+    Rechazarlos era un error de criterio: la señal se calcula con el cierre de
+    ayer, que a las 07:38 es exactamente el mismo que a las 08:30.
+    """
+    allowed, reason = should_scan(ny(2026, 8, 11, hour, minute))
+    assert allowed, reason
+
+
+def test_the_market_open_still_closes_the_window():
+    """Lo que sí hay que seguir rechazando: alertar con el mercado abierto."""
+    allowed, reason = should_scan(ny(2026, 8, 11, 9, 31))
+    assert not allowed and "ventana perdida" in reason
