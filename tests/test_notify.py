@@ -316,3 +316,62 @@ def test_a_fully_filtered_scan_without_a_known_reason():
     message = format_all_filtered(1, already_open=[], event_risk=[])
     assert "ninguna se envía" in message
     assert "Sin candidatos" in message
+
+
+# ── Cuatro días de silencio sin explicación ──────────────────────────────────
+
+def _funnel(evaluated: int, counts: dict[str, int]):
+    from trading.strategy import FUNNEL_STAGES, ScanFunnel
+
+    full = {key: counts.get(key, 0) for key, _ in FUNNEL_STAGES}
+    return ScanFunnel(evaluated=evaluated, no_data=0, counts=full)
+
+
+def test_a_quiet_day_without_a_funnel_still_works():
+    """La firma vieja se sigue usando en los tests y en cualquier llamada suelta."""
+    assert "criterios" in format_no_signals()
+
+
+def test_a_quiet_day_shows_where_the_candidates_died():
+    """El bot llevaba cuatro días diciendo 'no hay nada' sin decir por qué.
+
+    Desde fuera, eso es indistinguible de un filtro demasiado exigente o de un
+    bot averiado. El embudo firma el silencio.
+    """
+    message = format_no_signals(
+        _funnel(141, {"f_market": 141, "f_regime": 96, "f_trend_strength": 34,
+                      "f_volatility": 34, "f_liquidity": 34, "f_pullback": 3,
+                      "f_resume": 0})
+    )
+    assert "141" in message
+    assert "96" in message and "34" in message and "3" in message
+
+
+def test_a_quiet_day_names_the_tightest_filter():
+    """Saber cuál es el cuello de botella es lo que permite decidir si aflojarlo."""
+    message = format_no_signals(
+        _funnel(141, {"f_market": 141, "f_regime": 130, "f_trend_strength": 120,
+                      "f_volatility": 120, "f_liquidity": 120, "f_pullback": 4,
+                      "f_resume": 2, "niveles": 2, "riesgo_beneficio": 0})
+    )
+    assert "retroceso" in message           # el que más descartó: 120 → 4
+    assert "más descartó" in message
+
+
+def test_a_quiet_day_hides_stages_that_rejected_nobody():
+    """Listar diez etapas cuando ocho no descartaron a nadie es ruido."""
+    message = format_no_signals(
+        _funnel(141, {"f_market": 141, "f_regime": 141, "f_trend_strength": 141,
+                      "f_volatility": 141, "f_liquidity": 141, "f_pullback": 0,
+                      "f_resume": 0})
+    )
+    assert "tendencia alcista" not in message   # no descartó a nadie
+    assert "retroceso" in message               # este sí
+
+
+def test_a_quiet_day_stops_listing_once_nobody_is_left():
+    """Repetir '0 — …' cinco veces seguidas no informa de nada."""
+    message = format_no_signals(
+        _funnel(141, {"f_market": 141, "f_regime": 0})
+    )
+    assert message.count("• 0") == 1

@@ -267,3 +267,78 @@ def test_variant_weights_are_normalised():
 
     for name, params in variants().items():
         assert sum(params.weight_map.values()) == pytest.approx(1.0), name
+
+
+# ── Embudo del escaneo ────────────────────────────────────────────────────────
+# Cuatro días seguidos de "hoy no hay nada" no dicen si el mercado está
+# tranquilo, si un filtro es demasiado exigente o si el bot está roto. El
+# embudo convierte ese silencio en un dato.
+
+def test_the_funnel_finds_the_same_signals_as_the_plain_scan(uptrend_with_pullback):
+    """El embudo no puede cambiar QUÉ se encuentra, solo explicar el resto."""
+    bars = {"AAPL": uptrend_with_pullback}
+    plain = strategy.scan([STOCK], bars, DEFAULT_PARAMS)
+    with_funnel, _ = strategy.scan_with_funnel([STOCK], bars, DEFAULT_PARAMS)
+
+    assert [s.symbol for s in plain] == [s.symbol for s in with_funnel]
+    assert [s.score for s in plain] == [s.score for s in with_funnel]
+
+
+def test_the_funnel_counts_a_signal_through_every_stage(uptrend_with_pullback):
+    signals, funnel = strategy.scan_with_funnel(
+        [STOCK], {"AAPL": uptrend_with_pullback}, DEFAULT_PARAMS
+    )
+    assert signals, "el fixture debe producir señal; si no, el test no mide nada"
+    assert funnel.evaluated == 1
+    assert funnel.no_data == 0
+    # Sobrevive a todas las etapas, incluida la última.
+    assert all(survivors == 1 for _, _, survivors, _ in funnel.stages())
+    assert funnel.survivors == 1
+
+
+def test_the_funnel_names_the_filter_that_rejected(downtrend):
+    """Es la pregunta real del usuario: ¿cuál de los filtros manda hoy?"""
+    signals, funnel = strategy.scan_with_funnel(
+        [STOCK], {"AAPL": downtrend}, DEFAULT_PARAMS
+    )
+    assert signals == []
+    assert funnel.evaluated == 1
+
+    bottleneck = funnel.bottleneck
+    assert bottleneck is not None
+    key, _, dropped = bottleneck
+    # Una tendencia bajista muere en el régimen, no en un filtro de detalle.
+    assert key in {"f_market", "f_regime"}
+    assert dropped == 1
+
+
+def test_the_funnel_is_a_cascade_never_growing(sideways, downtrend, uptrend_with_pullback):
+    """Cada etapa se aplica sobre lo que sobrevivió a la anterior."""
+    bars = {"AAPL": uptrend_with_pullback, "MSFT": sideways, "NVDA": downtrend}
+    instruments = [universe.get(s) for s in ("AAPL", "MSFT", "NVDA")]
+    _, funnel = strategy.scan_with_funnel(instruments, bars, DEFAULT_PARAMS)
+
+    assert funnel.evaluated == 3
+    counts = [survivors for _, _, survivors, _ in funnel.stages()]
+    assert counts == sorted(counts, reverse=True)
+    assert counts[0] <= funnel.evaluated
+
+
+def test_an_instrument_without_enough_history_is_not_counted_as_rejected():
+    """Sin datos no es lo mismo que rechazado, y mezclarlos falsearía el embudo."""
+    short = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1e6]},
+        index=pd.bdate_range("2026-01-01", periods=1),
+    )
+    _, funnel = strategy.scan_with_funnel([STOCK], {"AAPL": short}, DEFAULT_PARAMS)
+    assert funnel.evaluated == 0
+    assert funnel.no_data == 1
+
+
+def test_a_nan_indicator_does_not_pass_a_stage():
+    """`bool(np.nan)` es True en Python: sin cuidado, un NaN aprobaría el filtro."""
+    row = pd.Series({"f_regime": np.nan, "f_market": True, "f_trend_strength": False})
+    assert strategy._stage_ok(row, "f_regime") is False
+    assert strategy._stage_ok(row, "f_market") is True
+    assert strategy._stage_ok(row, "f_trend_strength") is False
+    assert strategy._stage_ok(row, "no_existe") is False
