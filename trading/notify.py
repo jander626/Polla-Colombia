@@ -299,13 +299,38 @@ def format_all_filtered(
     return "\n".join(lines)
 
 
-def format_no_signals() -> str:
-    return (
-        "📡 *ESCANEO DIARIO*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "Hoy no hay ninguna oportunidad que cumpla los criterios.\n\n"
-        "_Un bot que encuentra señales todos los días se las está inventando._"
-    )
+def format_no_signals(funnel=None) -> str:
+    """Día sin señales, con el embudo que explica dónde se quedaron.
+
+    Sin el embudo, varios días seguidos de "hoy no hay nada" no permiten
+    distinguir un mercado tranquilo de un filtro demasiado exigente o de un bot
+    averiado. Con él, cada silencio viene firmado.
+    """
+    parts = [
+        "📡 *ESCANEO DIARIO*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "Hoy no hay ninguna oportunidad que cumpla los criterios.",
+    ]
+
+    if funnel is not None and funnel.evaluated:
+        parts.append("")
+        parts.append(f"De *{funnel.evaluated}* instrumentos revisados:")
+        for _, label, survivors, dropped in funnel.stages():
+            if dropped <= 0 and survivors == funnel.evaluated:
+                continue          # etapa que no descartó a nadie: no aporta
+            parts.append(f"• {survivors} — {label}")
+            if survivors == 0:
+                break             # a partir de aquí ya no queda nadie
+
+        bottleneck = funnel.bottleneck
+        if bottleneck is not None:
+            _, label, dropped = bottleneck
+            parts.append("")
+            parts.append(f"_El filtro que más descartó hoy: {label} ({dropped})._")
+
+    parts.append("")
+    parts.append("_Un bot que encuentra señales todos los días se las está inventando._")
+    return "\n".join(parts)
 
 
 def format_outcome(record: dict) -> str:

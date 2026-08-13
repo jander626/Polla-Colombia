@@ -39,7 +39,7 @@ from trading.data import MarketData
 from trading.risk import Calibration, apply_llm_penalty
 from trading.schedule import should_scan
 from trading.state import TradingState
-from trading.strategy import Signal, scan as scan_universe
+from trading.strategy import Signal, scan_with_funnel
 from trading.universe import BENCHMARK_SYMBOL, Instrument
 
 TRADING_DAYS_PER_YEAR = 252
@@ -210,7 +210,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
     print(f"[INFO] Superan el filtro de liquidez: {len(liquid)}/{len(bars)}")
 
-    signals = scan_universe(liquid, bars, params, benchmark)
+    signals, funnel = scan_with_funnel(liquid, bars, params, benchmark)
+    print("[INFO] Embudo del escaneo:")
+    print(funnel.summary())
+
     calibration = Calibration.load(CALIBRATION_FILE)
     stale = calibration.is_calibrated and not calibration.matches(params)
     if not calibration.is_calibrated:
@@ -230,7 +233,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not signals:
         print("[INFO] Ninguna oportunidad cumple los criterios hoy")
         if not args.dry_run:
-            client.broadcast(notify.format_no_signals(), state.chat_ids)
+            client.broadcast(notify.format_no_signals(funnel), state.chat_ids)
             state.mark_scanned(datetime.now(timezone.utc).astimezone().date())
             state.save(STATE_FILE)
         return 0

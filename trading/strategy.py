@@ -277,9 +277,16 @@ def _add_score(
 
 # ── Construcción de señales ───────────────────────────────────────────────────
 
-def _build_signal(
+def _evaluate(
     instrument: Instrument, row: pd.Series, bar_date: pd.Timestamp, params: StrategyParams
-) -> Signal | None:
+) -> tuple[Signal | None, str | None]:
+    """Construye la señal y, si la descarta, dice en qué etapa fue.
+
+    El motivo del descarte importa tanto como el descarte: sin él, un día sin
+    alertas es indistinguible de un bot averiado. Devolver las dos cosas juntas
+    —en vez de tener una función que decide y otra que explica— es lo que evita
+    que la explicación se desincronice de la decisión real.
+    """
     levels = compute_levels(
         close=float(row["close"]),
         atr=float(row["atr"]),
@@ -287,13 +294,13 @@ def _build_signal(
         params=params,
     )
     if levels is None or not levels.is_valid:
-        return None
+        return None, "niveles"
     if levels.risk_reward < params.min_risk_reward:
-        return None
+        return None, "riesgo_beneficio"
 
     score = float(row["score"])
     if not np.isfinite(score) or score < params.min_score:
-        return None
+        return None, "score"
 
     components = {
         key: float(row[f"c_{key}"])
@@ -301,18 +308,27 @@ def _build_signal(
         if pd.notna(row.get(f"c_{key}", np.nan))
     }
 
-    return Signal(
-        symbol=instrument.symbol,
-        name=instrument.name,
-        asset_class=instrument.asset_class,
-        bar_date=bar_date,
-        close=float(row["close"]),
-        atr=float(row["atr"]),
-        atr_pct=float(row["atr_pct"]),
-        score=score,
-        levels=levels,
-        components=components,
+    return (
+        Signal(
+            symbol=instrument.symbol,
+            name=instrument.name,
+            asset_class=instrument.asset_class,
+            bar_date=bar_date,
+            close=float(row["close"]),
+            atr=float(row["atr"]),
+            atr_pct=float(row["atr_pct"]),
+            score=score,
+            levels=levels,
+            components=components,
+        ),
+        None,
     )
+
+
+def _build_signal(
+    instrument: Instrument, row: pd.Series, bar_date: pd.Timestamp, params: StrategyParams
+) -> Signal | None:
+    return _evaluate(instrument, row, bar_date, params)[0]
 
 
 def signals_from_features(
@@ -346,6 +362,136 @@ def latest_signal(
     return _build_signal(instrument, last, feats.index[-1], params)
 
 
+# ── Embudo del escaneo ────────────────────────────────────────────────────────
+# Las etapas se aplican en cascada y en este orden, de lo más estructural a lo
+# más puntual. El orden importa para leer el resultado: cada número es "cuántos
+# candidatos siguen vivos tras aplicar esta etapa y todas las anteriores", así
+# que la caída más grande señala al filtro que de verdad manda ese día.
+
+FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
+    ("f_market", "el mercado está en régimen alcista"),
+    ("f_regime", "el instrumento está en tendencia alcista"),
+    ("f_trend_strength", "la tendencia tiene fuerza (ADX)"),
+    ("f_volatility", "la volatilidad es sana"),
+    ("f_liquidity", "hay liquidez suficiente"),
+    ("f_pullback", "hubo un retroceso"),
+    ("f_resume", "está reanudando"),
+    ("niveles", "el stop cabe donde debe"),
+    ("riesgo_beneficio", "el ratio riesgo/beneficio llega a 1.5"),
+    ("score", "la puntuación llega al mínimo"),
+)
+
+_STAGE_LABELS = dict(FUNNEL_STAGES)
+_POST_STAGES = ("niveles", "riesgo_beneficio", "score")
+
+
+@dataclass(frozen=True)
+class ScanFunnel:
+    """Cuántos candidatos sobreviven a cada etapa del escaneo.
+
+    Existe porque "hoy no hay nada" es una respuesta inútil por sí sola: no
+    distingue un mercado tranquilo de un filtro mal calibrado ni de un bot
+    roto. Con el embudo, un día sin señales viene con su propia explicación.
+    """
+
+    evaluated: int = 0
+    no_data: int = 0
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def stages(self) -> list[tuple[str, str, int, int]]:
+        """(clave, etiqueta, supervivientes, descartados en esta etapa)."""
+        rows: list[tuple[str, str, int, int]] = []
+        alive = self.evaluated
+        for key, label in FUNNEL_STAGES:
+            survivors = self.counts.get(key, 0)
+            rows.append((key, label, survivors, alive - survivors))
+            alive = survivors
+        return rows
+
+    @property
+    def survivors(self) -> int:
+        return self.counts.get(FUNNEL_STAGES[-1][0], 0)
+
+    @property
+    def bottleneck(self) -> tuple[str, str, int] | None:
+        """La etapa que más candidatos elimina: (clave, etiqueta, descartados)."""
+        rows = [row for row in self.stages() if row[3] > 0]
+        if not rows:
+            return None
+        key, label, _, dropped = max(rows, key=lambda row: row[3])
+        return key, label, dropped
+
+    def summary(self) -> str:
+        lines = [f"Instrumentos evaluados: {self.evaluated} (sin datos: {self.no_data})"]
+        for _, label, survivors, dropped in self.stages():
+            lines.append(f"  {survivors:>4} tras «{label}»  (−{dropped})")
+        return "\n".join(lines)
+
+
+def _stage_ok(row: pd.Series, key: str) -> bool:
+    """Un NaN es un 'no sé', y un 'no sé' no puede contar como aprobado.
+
+    `bool(np.nan)` es True en Python, así que sin este envoltorio un indicador
+    todavía sin calentar dejaría pasar al instrumento.
+    """
+    value = row.get(key, False)
+    return bool(value) if pd.notna(value) else False
+
+
+def scan_with_funnel(
+    instruments: list[Instrument],
+    bars: dict[str, pd.DataFrame],
+    params: StrategyParams,
+    benchmark_close: Optional[pd.Series] = None,
+) -> tuple[list[Signal], ScanFunnel]:
+    """Escaneo completo con el recuento de por qué cae cada candidato."""
+    found: list[Signal] = []
+    counts = {key: 0 for key, _ in FUNNEL_STAGES}
+    evaluated = 0
+    no_data = 0
+
+    for instrument in instruments:
+        df = bars.get(instrument.symbol)
+        if df is None or df.empty or len(df) < params.min_bars:
+            no_data += 1
+            continue
+
+        benchmark = None if instrument.is_forex else benchmark_close
+        try:
+            feats = compute_features(
+                df, params, benchmark, has_volume=not instrument.is_forex
+            )
+        except Exception as exc:  # un símbolo con datos raros no tumba el escaneo
+            print(f"[WARN] Fallo evaluando {instrument.symbol}: {exc}")
+            no_data += 1
+            continue
+
+        evaluated += 1
+        last = feats.iloc[-1]
+
+        alive = True
+        for key, _ in FUNNEL_STAGES:
+            if key in _POST_STAGES:
+                break
+            alive = alive and _stage_ok(last, key)
+            if not alive:
+                break
+            counts[key] += 1
+        if not alive:
+            continue
+
+        signal, failed = _evaluate(instrument, last, feats.index[-1], params)
+        for key in _POST_STAGES:
+            if failed == key:
+                break
+            counts[key] += 1
+        if signal is not None:
+            found.append(signal)
+
+    found.sort(key=lambda s: s.score, reverse=True)
+    return found, ScanFunnel(evaluated=evaluated, no_data=no_data, counts=counts)
+
+
 def scan(
     instruments: list[Instrument],
     bars: dict[str, pd.DataFrame],
@@ -353,19 +499,4 @@ def scan(
     benchmark_close: Optional[pd.Series] = None,
 ) -> list[Signal]:
     """Escaneo completo del universo, ordenado de mejor a peor puntuación."""
-    found: list[Signal] = []
-    for instrument in instruments:
-        df = bars.get(instrument.symbol)
-        if df is None or df.empty:
-            continue
-        benchmark = None if instrument.is_forex else benchmark_close
-        try:
-            signal = latest_signal(instrument, df, params, benchmark)
-        except Exception as exc:  # un símbolo con datos raros no tumba el escaneo
-            print(f"[WARN] Fallo evaluando {instrument.symbol}: {exc}")
-            continue
-        if signal is not None:
-            found.append(signal)
-
-    found.sort(key=lambda s: s.score, reverse=True)
-    return found
+    return scan_with_funnel(instruments, bars, params, benchmark_close)[0]
