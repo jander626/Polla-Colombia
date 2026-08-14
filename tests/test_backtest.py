@@ -317,3 +317,122 @@ def test_backtest_survives_corrupt_data(uptrend_with_pullback):
         DEFAULT_BACKTEST,
     )
     assert report.signals_generated > 0
+
+
+# ── Trailing: la palanca que mejora operaciones en vez de multiplicarlas ──────
+
+def _trail_signal(entry_max=100.0, stop=95.0, target=115.0, atr=5.0):
+    from trading.risk import Levels
+
+    return Signal(
+        symbol="AAPL", name="Apple", asset_class="stock",
+        bar_date=pd.Timestamp("2024-01-01"), close=99.0, atr=atr, atr_pct=atr / 99.0,
+        score=72.0, levels=Levels(entry_max, stop, target, 3.0, entry_max - stop,
+                                  target - entry_max),
+    )
+
+
+def _bars(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"open": [r[0] for r in rows], "high": [r[1] for r in rows],
+         "low": [r[2] for r in rows], "close": [r[3] for r in rows],
+         "volume": [1e6] * len(rows)},
+        index=pd.bdate_range("2024-01-01", periods=len(rows)),
+    )
+
+
+NO_COST = replace(DEFAULT_BACKTEST, round_trip_cost=0.0)
+TRAIL = replace(NO_COST, trail_atr_mult=2.0)     # 2 ATR = 10 puntos
+
+
+def test_trailing_off_changes_nothing():
+    """El comportamiento en vivo es el de siempre; el trailing es opt-in."""
+    bars = _bars([(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0),
+                  (100.0, 110.0, 99.0, 109.0), (109.0, 110.0, 94.0, 95.0)])
+    plain = simulate_signal(_trail_signal(), bars, NO_COST)
+    assert plain.outcome == "loss"
+    assert plain.exit_price == pytest.approx(95.0)
+
+
+def test_trailing_turns_a_full_loss_into_a_small_one():
+    """Es el efecto que se quiere medir: la que se da la vuelta cuesta menos.
+
+    Sube a 110 (el trail pasa a 110 − 2 ATR = 100) y luego se desploma. Sin
+    trailing sale en 95 (−1R); con trailing sale en 100, por encima de la
+    entrada.
+    """
+    bars = _bars([(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0),
+                  (100.0, 110.0, 99.0, 109.0), (109.0, 110.0, 94.0, 95.0)])
+    trailed = simulate_signal(_trail_signal(), bars, TRAIL)
+
+    assert trailed.exit_price == pytest.approx(100.0)
+    assert trailed.r_multiple > simulate_signal(_trail_signal(), bars, NO_COST).r_multiple
+
+
+def test_a_trailing_stop_above_entry_is_not_counted_as_a_loss():
+    """Salir por el stop no es perder cuando el stop ya está sobre la entrada."""
+    bars = _bars([(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0),
+                  (100.0, 114.0, 99.0, 113.0), (113.0, 113.0, 100.0, 101.0)])
+    trailed = simulate_signal(_trail_signal(), bars, TRAIL)
+
+    assert trailed.exit_price > trailed.entry_price
+    assert trailed.outcome == "win"
+    assert trailed.is_win
+
+
+def test_the_trailing_stop_never_goes_down():
+    """Un stop que baja no es un stop: convertiría cada retroceso en más riesgo."""
+    bars = _bars([(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0),
+                  (100.0, 112.0, 99.0, 111.0),   # trail sube a 102
+                  (111.0, 111.5, 103.0, 104.0),  # máximo menor: no debe bajar
+                  (104.0, 105.0, 101.0, 101.5)]) # toca 102 -> sale ahí
+    trailed = simulate_signal(_trail_signal(), bars, TRAIL)
+    assert trailed.exit_price == pytest.approx(102.0)
+
+
+def test_the_trail_does_not_use_todays_high_against_todays_low():
+    """El fallo más fácil de cometer aquí, y el que inventaría rentabilidad.
+
+    Dentro de una vela diaria no se sabe si el máximo llegó antes o después del
+    mínimo. Si el stop de hoy se calculase con el máximo de hoy, la operación
+    saldría en un nivel que todavía no existía cuando el precio pasó por ahí.
+
+    La tercera vela sube a 120 y baja a 99 el MISMO día. Con mirada al futuro,
+    su trail (120 − 2 ATR = 110) se compararía con su propio mínimo de 99 y
+    cerraría la operación ahí. Honestamente, esa vela no cierra nada: el stop
+    que rige durante ella se fijó con máximos anteriores.
+    """
+    bars = _bars([(99.0, 100.0, 98.0, 99.0),      # 0 señal
+                  (99.0, 101.0, 98.0, 100.0),     # 1 entrada en 99
+                  (100.0, 120.0, 99.0, 100.0),    # 2 máximo 120, mínimo 99
+                  (115.0, 118.0, 112.0, 116.0)])  # 3 tranquila, sobre el trail
+    trailed = simulate_signal(_trail_signal(target=200.0), bars, TRAIL)
+
+    assert trailed.exit_date != bars.index[2], "el trail miró al futuro"
+    assert trailed.exit_price != pytest.approx(110.0)
+
+
+def test_letting_winners_run_ignores_the_fixed_target():
+    """Cortar en 3 ATR renuncia a la cola derecha; esta variante la persigue."""
+    rows = [(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0)]
+    rows += [(100.0 + 5 * i, 106.0 + 5 * i, 99.0 + 5 * i, 105.0 + 5 * i) for i in range(8)]
+    rows.append((145.0, 145.0, 120.0, 121.0))
+    bars = _bars(rows)
+
+    capped = simulate_signal(_trail_signal(), bars, TRAIL)
+    running = simulate_signal(_trail_signal(), bars, replace(TRAIL, let_winners_run=True))
+
+    assert capped.exit_price == pytest.approx(115.0)   # se corta en el objetivo
+    assert running.exit_price > capped.exit_price      # el trail deja correr
+    assert running.r_multiple > capped.r_multiple
+
+
+def test_letting_winners_run_needs_a_trail_to_exit():
+    """Sin trailing no habría con qué salir: la bandera no puede quedar suelta."""
+    bars = _bars([(99.0, 100.0, 98.0, 99.0), (99.0, 101.0, 98.0, 100.0),
+                  (100.0, 116.0, 99.0, 115.5)])
+    trade = simulate_signal(
+        _trail_signal(), bars, replace(NO_COST, let_winners_run=True)
+    )
+    assert trade.outcome == "win"
+    assert trade.exit_price == pytest.approx(115.0)   # el objetivo sigue cerrando

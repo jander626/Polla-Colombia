@@ -397,7 +397,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     print(f"[INFO] Con datos utilizables: {len(tradable)}/{len(instruments)}")
 
     if args.compare:
-        # Se miden las tres variantes definidas a priori y se publican todas.
+        # Se miden todas las variantes definidas a priori y se publican todas,
+        # incluida la actual: sin ella no hay contra qué comparar.
         table, reports = compare_variants(
             variants(), tradable, bars, DEFAULT_BACKTEST, benchmark
         )
