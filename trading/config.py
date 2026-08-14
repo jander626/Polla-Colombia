@@ -245,19 +245,60 @@ BASELINE_WEIGHTS: tuple[tuple[str, float], ...] = (
 )
 
 
-def variants() -> dict[str, "StrategyParams"]:
-    """Las tres variantes que se comparan, y qué pregunta responde cada una."""
-    fixed = StrategyParams(
-        weights=BASELINE_WEIGHTS, use_market_regime_filter=False
-    )
+def variants() -> dict[str, tuple["StrategyParams", "BacktestParams"]]:
+    """Las variantes a comparar, cada una respondiendo UNA pregunta.
+
+    Salen del embudo del escaneo del 14 de agosto, no de buscar en los datos
+    hasta que algo saliera bien. Ese día, de 141 instrumentos:
+
+        141 → mercado en régimen alcista        (−0)
+         93 → instrumento en tendencia alcista  (−48)
+         49 → tendencia con fuerza (ADX)        (−44)
+         48 → volatilidad y liquidez            (−1)
+          4 → hubo un retroceso                 (−44)  ← el 92% muere aquí
+          0 → está reanudando                   (−4)
+
+    El diagnóstico es inequívoco: el cuello de botella es el filtro de
+    retroceso. Exigir que el RSI(14) baje de 45 es pedir una corrección
+    profunda en un valor que, por los filtros anteriores, ya está en tendencia
+    alcista con fuerza. El descanso típico de un valor así lleva el RSI a
+    45-55, no por debajo de 45.
+
+    Hay dos palancas distintas y conviene no confundirlas:
+
+    - Aflojar filtros da MÁS operaciones, no mejores. Sube la frecuencia y
+      diluye la ventaja por operación.
+    - El trailing da MEJORES operaciones sin cambiar cuántas hay: recorta a las
+      perdedoras que se dan la vuelta antes de tocar el stop planificado.
+
+    Por eso se miden por separado, y luego juntas. La columna que decide sigue
+    siendo el límite inferior de la esperanza: si es negativo, la variante no
+    ha demostrado nada por muchas señales que produzca.
+    """
+    base = StrategyParams()
+    bt = BacktestParams()
+
+    # Aflojar el retroceso obliga a mover también la reanudación: si el RSI
+    # "cae por debajo de 50" y basta con "estar por encima de 45" para
+    # considerarlo reanudado, un RSI plano en 47 cumpliría las dos cosas a la
+    # vez y no habría giro ninguno que confirmar.
+    suave = replace(base, pullback_rsi_max=50.0, resume_rsi_min=50.0)
+
     return {
-        # A: solo quitar el componente que puntuaba al revés.
-        "A_sin_fuerza_relativa": fixed,
-        # B: A + filtro de régimen. ¿Recorta la caída máxima?
-        "B_con_regimen": replace(fixed, use_market_regime_filter=True),
-        # C: B + los dos efectos documentados, cada uno en su horizonte.
-        "C_momentum_y_reversion": replace(
-            fixed, use_market_regime_filter=True, weights=StrategyParams().weights
+        "0_actual": (base, bt),
+        # 1 — ¿Es el umbral de RSI lo que deja al bot mudo una semana entera?
+        "1_retroceso_a_50": (suave, bt),
+        # 2 — 1 + más margen entre el hundimiento y el giro. Con 5 velas, un
+        #     valor que se hundió y rebotó hace 6 días ya no es alcanzable.
+        "2_ventana_10": (replace(suave, pullback_lookback=10), bt),
+        # 3 — Sin tocar un solo filtro: ¿sube la esperanza solo con salir mejor?
+        "3_trailing": (base, replace(bt, trail_atr_mult=2.5)),
+        # 4 — Las dos palancas juntas. Más señales y mejores salidas.
+        "4_ambos": (replace(suave, pullback_lookback=10), replace(bt, trail_atr_mult=2.5)),
+        # 5 — 4 pero dejando correr la cola derecha en vez de cortar en 3 ATR.
+        "5_dejar_correr": (
+            replace(suave, pullback_lookback=10),
+            replace(bt, trail_atr_mult=2.5, let_winners_run=True),
         ),
     }
 
@@ -317,6 +358,21 @@ class BacktestParams:
     # Contarlo como pérdida sesga el backtest en contra, que es el lado
     # correcto en el que equivocarse.
     ambiguous_bar_is_loss: bool = True
+
+    # ── Gestión de la salida ─────────────────────────────────────────────────
+    # Stop dinámico tipo "chandelier": el stop sube a `máximo alcanzado −
+    # N × ATR` y nunca baja. En 0 queda desactivado y la salida es la de
+    # siempre (stop fijo u objetivo), que es el comportamiento en vivo.
+    #
+    # Es el único cambio que puede subir la esperanza sin tocar los filtros:
+    # aflojar filtros da MÁS operaciones, no mejores. Recortar a las
+    # perdedoras da mejores. Pero se mide antes de adoptarlo.
+    trail_atr_mult: float = 0.0
+    # Con el objetivo fijo, una ganadora se corta en 3 ATR aunque siguiera
+    # subiendo. Activando esto el objetivo deja de cerrar la operación y solo
+    # sale el trailing: es la hipótesis de "dejar correr la cola derecha".
+    # Sin `trail_atr_mult` no tiene efecto (no habría con qué salir).
+    let_winners_run: bool = False
 
 
 DEFAULT_BACKTEST = BacktestParams()

@@ -72,6 +72,16 @@ class Trade:
         return self.was_filled and np.isfinite(self.return_pct) and self.return_pct > 0
 
 
+def _stop_outcome(exit_price: float, entry_price: float) -> Outcome:
+    """Salir por el stop no implica perder cuando el stop ha subido.
+
+    Con trailing, un stop alcanzado por encima de la entrada es una ganadora
+    recortada, no una pérdida. Etiquetarla como "loss" haría que el porcentaje
+    de acierto contase al revés justo en las operaciones que el trailing salva.
+    """
+    return "win" if exit_price > entry_price else "loss"
+
+
 def simulate_signal(
     signal: Signal,
     df: pd.DataFrame,
@@ -142,35 +152,56 @@ def simulate_signal(
     exit_price = float(df.iloc[exit_pos]["close"])
     exit_at = exit_pos
 
+    # El stop puede moverse (trailing), el objetivo no. `stop` arranca en el
+    # nivel planificado y solo sube.
+    stop = float(levels.stop)
+    trailing = bt.trail_atr_mult > 0 and math.isfinite(signal.atr) and signal.atr > 0
+    # Sin objetivo que cierre, el trailing es lo único que saca de la posición.
+    target_exits = not (trailing and bt.let_winners_run)
+
     for pos in range(entry_pos, exit_pos + 1):
         bar = df.iloc[pos]
         open_, high, low = float(bar["open"]), float(bar["high"]), float(bar["low"])
 
         # Huecos: la apertura manda sobre el nivel teórico.
-        if open_ <= levels.stop:
-            outcome, exit_price, exit_at = "loss", open_, pos
+        if open_ <= stop:
+            outcome, exit_price, exit_at = _stop_outcome(open_, entry_price), open_, pos
             break
-        if open_ >= levels.target:
+        if target_exits and open_ >= levels.target:
             outcome, exit_price, exit_at = "win", open_, pos
             break
 
-        hit_stop = low <= levels.stop
-        hit_target = high >= levels.target
+        hit_stop = low <= stop
+        hit_target = target_exits and high >= levels.target
 
         if hit_stop and hit_target:
             # Vela ambigua: sin datos intradía no sabemos el orden. Contarla
             # como pérdida sesga el backtest en contra, que es el lado
             # correcto en el que equivocarse.
-            outcome = "loss" if bt.ambiguous_bar_is_loss else "win"
-            exit_price = levels.stop if bt.ambiguous_bar_is_loss else levels.target
+            if bt.ambiguous_bar_is_loss:
+                outcome, exit_price = _stop_outcome(stop, entry_price), stop
+            else:
+                outcome, exit_price = "win", float(levels.target)
             exit_at = pos
             break
         if hit_stop:
-            outcome, exit_price, exit_at = "loss", float(levels.stop), pos
+            outcome, exit_price, exit_at = _stop_outcome(stop, entry_price), float(stop), pos
             break
         if hit_target:
             outcome, exit_price, exit_at = "win", float(levels.target), pos
             break
+
+        # La barra no cerró la operación: ahora —y solo ahora— se sube el
+        # trailing con el máximo de HOY.
+        #
+        # El orden importa y es la diferencia entre un backtest honesto y uno
+        # que mira al futuro: dentro de una vela diaria no se sabe si el máximo
+        # llegó antes o después del mínimo. Si se subiera el stop con el máximo
+        # de hoy y luego se comparase contra el mínimo de hoy, se estaría
+        # cerrando la operación en un nivel que aún no existía. Por eso el stop
+        # que se aplica en la barra N solo usa máximos de barras anteriores.
+        if trailing:
+            stop = max(stop, high - bt.trail_atr_mult * signal.atr)
 
     gross_return = (exit_price - entry_price) / entry_price
     net_return = gross_return - bt.round_trip_cost
@@ -498,38 +529,52 @@ def run_backtest(
 # ── Comparación de variantes ──────────────────────────────────────────────────
 
 def compare_variants(
-    named_params: dict[str, StrategyParams],
+    named_params: dict[str, tuple[StrategyParams, BacktestParams]],
     instruments: list[Instrument],
     bars: dict[str, pd.DataFrame],
-    bt: BacktestParams,
+    default_bt: BacktestParams,
     benchmark_close: Optional[pd.Series] = None,
 ) -> tuple[str, dict[str, BacktestReport]]:
     """Mide varias variantes sobre los mismos datos y las publica TODAS.
 
     Reportar solo la ganadora sería hacer trampa: con suficientes intentos,
-    alguna variante siempre parece buena por azar. Ver las tres juntas, con su
-    límite inferior y su partición temporal, permite distinguir una mejora real
-    de una casualidad afortunada.
+    alguna variante siempre parece buena por azar. Verlas todas, con su límite
+    inferior y su partición temporal, permite distinguir una mejora real de una
+    casualidad afortunada.
+
+    Cada variante trae sus propios ajustes de backtest además de los de
+    estrategia, porque la gestión de la salida (trailing) es una palanca tan
+    legítima como los filtros y hay que poder medirla por separado.
     """
     reports: dict[str, BacktestReport] = {}
-    for name, params in named_params.items():
+    used_bt: dict[str, BacktestParams] = {}
+    for name, spec in named_params.items():
+        params, bt = spec if isinstance(spec, tuple) else (spec, default_bt)
         print(f"[INFO] Midiendo variante {name}…")
         reports[name] = run_backtest(instruments, bars, params, bt, benchmark_close)
+        used_bt[name] = bt
 
     lines = [
-        f"{'Variante':<26} {'Ops':>6} {'Acierto':>9} {'R medio':>9} "
-        f"{'R mínimo':>9} {'Caída máx':>10}",
+        f"{'Variante':<20} {'Señales':>8} {'/año':>7} {'Ops':>6} {'Acierto':>9} "
+        f"{'R medio':>9} {'R mínimo':>9} {'Caída máx':>10}",
     ]
     for name, report in reports.items():
         h = report.headline()
+        years = max(used_bt[name].years, 1)
         lines.append(
-            f"{name:<26} {h['ops']:>6} {100 * h['win_rate']:>8.1f}% "
-            f"{h['avg_r']:>+9.3f} {h['lower_r']:>+9.3f} {h['max_dd']:>9.1f}R"
+            f"{name:<20} {report.signals_generated:>8} "
+            f"{report.signals_generated / years:>7.0f} {h['ops']:>6} "
+            f"{100 * h['win_rate']:>8.1f}% {h['avg_r']:>+9.3f} "
+            f"{h['lower_r']:>+9.3f} {h['max_dd']:>9.1f}R"
         )
 
     lines.append(
+        "\n  '/año' es la frecuencia: cuántas alertas al año produciría. Dividido\n"
+        "  entre 252 sesiones da las que verías al día. Es la columna que explica\n"
+        "  una semana en silencio, pero NO es la que decide si vale la pena.\n"
         "\n  'R mínimo' es la ventaja que sobrevive a su propia incertidumbre.\n"
         "  Si es negativo, la variante NO ha demostrado nada, por buena que\n"
-        "  parezca su media. Es la única columna que decide."
+        "  parezca su media, ni por muchas señales que produzca. Es la única\n"
+        "  columna que decide."
     )
     return "\n".join(lines), reports

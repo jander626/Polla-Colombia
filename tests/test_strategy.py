@@ -246,27 +246,42 @@ def test_the_variants_differ_from_each_other():
     from trading.config import variants
 
     defined = variants()
-    assert len(defined) == 3
     signatures = {
-        (p.use_market_regime_filter, tuple(sorted(p.weight_map)))
-        for p in defined.values()
+        (params.signature, bt.trail_atr_mult, bt.let_winners_run)
+        for params, bt in defined.values()
     }
-    assert len(signatures) == 3
+    assert len(signatures) == len(defined)
+
+
+def test_the_baseline_is_among_the_variants():
+    """Sin el comportamiento actual en la tabla, no hay contra qué comparar."""
+    from trading.config import DEFAULT_BACKTEST, DEFAULT_PARAMS, variants
+
+    assert ("0_actual", (DEFAULT_PARAMS, DEFAULT_BACKTEST)) in variants().items()
 
 
 def test_no_variant_gives_weight_to_the_inverted_component():
     """Ninguna variante puede reintroducir el componente que puntuaba al revés."""
     from trading.config import variants
 
-    for name, params in variants().items():
+    for name, (params, _) in variants().items():
         assert "relative_strength" not in params.weight_map, name
 
 
 def test_variant_weights_are_normalised():
     from trading.config import variants
 
-    for name, params in variants().items():
+    for name, (params, _) in variants().items():
         assert sum(params.weight_map.values()) == pytest.approx(1.0), name
+
+
+def test_loosening_the_pullback_keeps_the_resume_above_it():
+    """Si el RSI "cae de 50" y basta con "estar sobre 45", un RSI plano en 47
+    cumpliría las dos condiciones a la vez y no habría giro que confirmar."""
+    from trading.config import variants
+
+    for name, (params, _) in variants().items():
+        assert params.resume_rsi_min >= params.pullback_rsi_max, name
 
 
 # ── Embudo del escaneo ────────────────────────────────────────────────────────
