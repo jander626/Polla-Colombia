@@ -492,3 +492,111 @@ def test_neither_half_demonstrating_says_so_with_both_numbers():
 
     text = _report_from_r(flat, also_flat).out_of_sample_split()
     assert "Ningún tramo demuestra ventaja" in text
+
+
+# ── Búsqueda sistemática ──────────────────────────────────────────────────────
+# Barrer 81 combinaciones sobre una muestra produce una ganadora aunque no haya
+# nada que ganar. Estos tests protegen lo único que hace útil el barrido: que
+# el ranking use el tramo que las combinaciones NO vieron, y que cuando nada
+# funciona lo diga en vez de coronar a la menos mala.
+
+def _tiny_grid():
+    from trading.config import PREDICTIVE_WEIGHTS
+
+    base = DEFAULT_PARAMS
+    return {
+        "rsi45·actual·adx20": base,
+        "rsi50·predictivo·adx20": replace(
+            base, pullback_rsi_max=50.0, resume_rsi_min=50.0,
+            weights=PREDICTIVE_WEIGHTS,
+        ),
+    }
+
+
+def test_the_search_measures_every_combination(uptrend_with_pullback):
+    from trading.backtest import run_search
+
+    bars = {"AAPL": uptrend_with_pullback}
+    results = run_search(
+        [STOCK], bars, _tiny_grid(), (0.0, 2.0), NO_COST, train_fraction=0.6
+    )
+
+    assert len(results) == 4                       # 2 estrategias × 2 salidas
+    assert {r.trail for r in results} == {0.0, 2.0}
+    assert len({r.name for r in results}) == 4
+
+
+def test_generating_signals_once_per_strategy_gives_the_same_signals(
+    uptrend_with_pullback,
+):
+    """La optimización no puede cambiar el resultado, solo el tiempo.
+
+    El barrido genera las señales una vez por estrategia y las simula con cada
+    salida. Si eso difiriese de medir cada combinación por separado, todo el
+    ranking estaría midiendo otra cosa.
+    """
+    from trading.backtest import run_search
+
+    bars = {"AAPL": uptrend_with_pullback}
+    searched = run_search([STOCK], bars, _tiny_grid(), (0.0,), NO_COST)
+    direct = run_backtest([STOCK], bars, DEFAULT_PARAMS, NO_COST)
+
+    mine = next(r for r in searched if r.label == "rsi45·actual·adx20")
+    assert mine.signals == direct.signals_generated
+    assert mine.ops == direct.headline()["ops"]
+    assert mine.avg_r == pytest.approx(direct.headline()["avg_r"], abs=1e-9)
+
+
+def test_the_ranking_uses_the_validation_half_not_the_total():
+    """Ordenar por el total sería ordenar por cuánto memorizó cada combinación."""
+    from trading.backtest import SearchResult, format_search
+
+    def result(label: str, total: float, validation: float) -> SearchResult:
+        return SearchResult(
+            label=label, trail=0.0, params=DEFAULT_PARAMS, bt=NO_COST,
+            signals=500, years=5, ops=400, win_rate=0.4, avg_r=total,
+            lower_r=total, max_dd=-20.0, train_ops=240, train_lower=total,
+            test_ops=160, test_avg=validation, test_lower=validation,
+        )
+
+    text = format_search(
+        [result("memorizo", 0.90, 0.01), result("aguanto", 0.30, 0.25)]
+    )
+    lines = [ln for ln in text.splitlines() if "·trail" in ln]
+    assert lines[0].startswith("aguanto"), "el ranking premió al que memorizó"
+
+
+def test_a_search_where_nothing_survives_says_so():
+    """Con 81 intentos, que la mejor no pase el listón ES la respuesta."""
+    from trading.backtest import SearchResult, format_search
+
+    losers = [
+        SearchResult(
+            label=f"c{i}", trail=0.0, params=DEFAULT_PARAMS, bt=NO_COST,
+            signals=500, years=5, ops=400, win_rate=0.35, avg_r=0.30,
+            lower_r=0.10, max_dd=-30.0, train_ops=240, train_lower=0.20,
+            test_ops=160, test_avg=0.05, test_lower=0.01,
+        )
+        for i in range(5)
+    ]
+    text = format_search(losers)
+
+    assert "NINGUNA combinación demuestra ventaja" in text
+    assert "afinarle" in text
+    assert "Mejor por validación" not in text
+
+
+def test_a_credible_winner_is_still_labelled_as_a_candidate():
+    """Pasar el listón la hace candidata, no demostrada. Hay que decirlo."""
+    from trading.backtest import SearchResult, format_search
+
+    winner = SearchResult(
+        label="ganadora", trail=2.5, params=DEFAULT_PARAMS, bt=NO_COST,
+        signals=600, years=5, ops=500, win_rate=0.42, avg_r=0.40,
+        lower_r=0.20, max_dd=-18.0, train_ops=300, train_lower=0.25,
+        test_ops=200, test_avg=0.35, test_lower=0.18,
+    )
+    text = format_search([winner])
+
+    assert "Mejor por validación" in text
+    assert "candidata, no demostrada" in text

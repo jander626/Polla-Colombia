@@ -28,7 +28,12 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import MIN_MEANINGFUL_EXPECTANCY, BacktestParams, StrategyParams
+from .config import (
+    MIN_MEANINGFUL_EXPECTANCY,
+    BacktestParams,
+    StrategyParams,
+    replace,
+)
 from .risk import Calibration
 from .strategy import Signal, compute_features, signals_from_features
 from .universe import Instrument
@@ -598,3 +603,218 @@ def compare_variants(
         "  columna que decide."
     )
     return "\n".join(lines), reports
+
+
+# ── Búsqueda sistemática ──────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class SearchResult:
+    """Una combinación medida, con sus números dentro y fuera de muestra.
+
+    Los dos juegos de números van juntos a propósito. Buscar sobre 81
+    combinaciones garantiza que alguna parezca excelente por azar: la que gana
+    lo hace, en parte, por haber tenido suerte en esta muestra concreta. La
+    única defensa es mirar cómo se comporta en el tramo que no se usó para
+    elegirla, y para poder mirarlo hay que publicarlo al lado.
+    """
+
+    label: str
+    trail: float
+    params: StrategyParams
+    bt: BacktestParams
+    signals: int
+    years: int
+    ops: int
+    win_rate: float
+    avg_r: float
+    lower_r: float
+    max_dd: float
+    train_ops: int
+    train_lower: float
+    test_ops: int
+    test_avg: float
+    test_lower: float
+
+    @property
+    def name(self) -> str:
+        return f"{self.label}·trail{self.trail:g}"
+
+    @property
+    def signals_per_year(self) -> float:
+        return self.signals / max(self.years, 1)
+
+    @property
+    def is_credible(self) -> bool:
+        """Ventaja demostrada en el tramo que NO se usó para elegirla."""
+        return self.test_lower >= MIN_MEANINGFUL_EXPECTANCY
+
+
+def _half_metrics(trades: list[Trade], train_fraction: float):
+    """(ops_train, lower_train, ops_test, media_test, lower_test)."""
+    usable = sorted(
+        (t for t in trades if t.was_filled and np.isfinite(t.r_multiple)),
+        key=lambda t: t.signal_date,
+    )
+    if len(usable) < 40:
+        return 0, float("nan"), 0, float("nan"), float("nan")
+
+    cut = int(len(usable) * train_fraction)
+    train, test = usable[:cut], usable[cut:]
+
+    def lower(chunk: list[Trade]) -> float:
+        r = np.array([t.r_multiple for t in chunk])
+        if len(r) < 2:
+            return float("nan")
+        return float(r.mean() - 1.96 * r.std(ddof=1) / np.sqrt(len(r)))
+
+    test_r = np.array([t.r_multiple for t in test])
+    return (
+        len(train),
+        lower(train),
+        len(test),
+        float(test_r.mean()) if len(test_r) else float("nan"),
+        lower(test),
+    )
+
+
+def run_search(
+    instruments: list[Instrument],
+    bars: dict[str, pd.DataFrame],
+    grid: dict[str, StrategyParams],
+    trails: tuple[float, ...],
+    base_bt: BacktestParams,
+    benchmark_close: Optional[pd.Series] = None,
+    train_fraction: float = 0.6,
+) -> list[SearchResult]:
+    """Mide toda la rejilla en una sola pasada sobre los datos.
+
+    La parte cara es generar las señales (indicadores sobre 141 instrumentos);
+    simularlas es casi gratis. Y el trailing no cambia QUÉ señales existen,
+    solo cómo se cierran. Así que por cada combinación de estrategia se generan
+    las señales una vez y se simulan con todas las salidas: 27 cálculos de
+    indicadores en vez de 81.
+    """
+    results: list[SearchResult] = []
+
+    for position, (label, params) in enumerate(grid.items(), start=1):
+        print(f"[INFO] ({position}/{len(grid)}) {label}…")
+
+        generated = 0
+        pending: list[tuple[Signal, pd.DataFrame]] = []
+        for instrument in instruments:
+            df = bars.get(instrument.symbol)
+            if df is None or len(df) < params.min_bars:
+                continue
+            benchmark = None if instrument.is_forex else benchmark_close
+            try:
+                feats = compute_features(
+                    df, params, benchmark, has_volume=not instrument.is_forex
+                )
+                signals = signals_from_features(instrument, feats, params)
+            except Exception as exc:
+                print(f"[WARN] {instrument.symbol}: {exc}")
+                continue
+            generated += len(signals)
+            pending.extend((signal, df) for signal in signals)
+
+        for trail in trails:
+            bt = replace(base_bt, trail_atr_mult=trail)
+            report = BacktestReport()
+            report.signals_generated = generated
+            report.trades = [simulate_signal(s, df, bt) for s, df in pending]
+
+            head = report.headline()
+            train_ops, train_lower, test_ops, test_avg, test_lower = _half_metrics(
+                report.trades, train_fraction
+            )
+            results.append(
+                SearchResult(
+                    label=label, trail=trail, params=params, bt=bt,
+                    signals=generated, years=bt.years, ops=head["ops"],
+                    win_rate=head["win_rate"], avg_r=head["avg_r"],
+                    lower_r=head["lower_r"], max_dd=head["max_dd"],
+                    train_ops=train_ops, train_lower=train_lower,
+                    test_ops=test_ops, test_avg=test_avg, test_lower=test_lower,
+                )
+            )
+
+    return results
+
+
+def format_search(results: list[SearchResult], top: int = 15) -> str:
+    """Ranking por el tramo que NO se usó para elegir, no por el total.
+
+    Ordenar por el resultado completo sería ordenar por cuánto se ajustó cada
+    combinación a esta muestra concreta: la primera de la lista sería, por
+    construcción, la que mejor memorizó estos cinco años. Ordenar por el tramo
+    reciente —que ninguna de las 81 vio al ser definida— no elimina el
+    problema, pero sí lo reduce a lo que de verdad importa: qué seguía
+    funcionando al final del periodo.
+    """
+    if not results:
+        return "Sin resultados: ninguna combinación produjo operaciones."
+
+    usable = [r for r in results if r.test_ops > 0 and np.isfinite(r.test_lower)]
+    if not usable:
+        return (
+            "Ninguna combinación dejó operaciones suficientes en el tramo de\n"
+            "validación. La rejilla es demasiado estricta para esta muestra."
+        )
+
+    ranked = sorted(usable, key=lambda r: r.test_lower, reverse=True)
+    credible = [r for r in ranked if r.is_credible]
+
+    lines = [
+        f"{'Combinación':<34} {'/año':>6} {'Ops':>5} {'Acier':>7} "
+        f"{'R med':>8} {'R mín':>8} {'Val.ops':>8} {'Val.R':>8} {'Val.mín':>8} {'Caída':>8}",
+    ]
+    for r in ranked[:top]:
+        lines.append(
+            f"{r.name:<34} {r.signals_per_year:>6.0f} {r.ops:>5} "
+            f"{100 * r.win_rate:>6.1f}% {r.avg_r:>+8.3f} {r.lower_r:>+8.3f} "
+            f"{r.test_ops:>8} {r.test_avg:>+8.3f} {r.test_lower:>+8.3f} "
+            f"{r.max_dd:>7.1f}R"
+        )
+
+    baseline = next(
+        (r for r in results if r.label.startswith("rsi45·actual·adx20") and r.trail == 0),
+        None,
+    )
+    if baseline is not None and baseline not in ranked[:top]:
+        lines.append("  " + "─" * 106)
+        lines.append(
+            f"{'(actual) ' + baseline.name:<34} {baseline.signals_per_year:>6.0f} "
+            f"{baseline.ops:>5} {100 * baseline.win_rate:>6.1f}% "
+            f"{baseline.avg_r:>+8.3f} {baseline.lower_r:>+8.3f} "
+            f"{baseline.test_ops:>8} {baseline.test_avg:>+8.3f} "
+            f"{baseline.test_lower:>+8.3f} {baseline.max_dd:>7.1f}R"
+        )
+
+    lines.append(
+        f"\n  Se midieron {len(results)} combinaciones. 'Val.' es el 40% final del\n"
+        "  periodo, que ninguna combinación vio al ser definida; el ranking va por\n"
+        f"  'Val.mín'. Con ventaja demostrada ahí (≥ {MIN_MEANINGFUL_EXPECTANCY:+.3f}): "
+        f"{len(credible)} de {len(results)}."
+    )
+
+    if not credible:
+        lines.append(
+            "\n  ✗ NINGUNA combinación demuestra ventaja en el tramo de validación.\n"
+            "    Con 81 intentos sobre la misma muestra, que la mejor no pase el\n"
+            "    listón no es mala suerte: es la respuesta. Esta familia de\n"
+            "    estrategias dejó de funcionar en el periodo reciente, y afinarle\n"
+            "    los umbrales no lo va a arreglar."
+        )
+    else:
+        best = ranked[0]
+        lines.append(
+            f"\n  Mejor por validación: {best.name}\n"
+            f"    {best.signals_per_year:.0f} señales/año · {best.test_ops} ops de validación · "
+            f"límite inferior {best.test_lower:+.3f}R\n"
+            "\n  Antes de adoptarla: 81 intentos sobre una muestra producen una\n"
+            "  ganadora aunque no haya nada que ganar. Que esta pase el listón la\n"
+            "  hace candidata, no demostrada. Lo que la demostraría es funcionar\n"
+            "  en los meses que vienen, sobre datos que todavía no existen."
+        )
+
+    return "\n".join(lines)

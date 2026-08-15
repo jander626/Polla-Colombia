@@ -270,6 +270,61 @@ PREDICTIVE_WEIGHTS: tuple[tuple[str, float], ...] = (
 )
 
 
+# La puntuación más simple posible: el único componente que el diagnóstico
+# midió como predictivo, y nada más. Está aquí porque "más simple" es una
+# hipótesis con derecho a competir, no un consuelo: siete componentes de los
+# que uno predice, tres puntúan al revés y tres son ruido tienen menos
+# información que ese uno solo.
+MOMENTUM_ONLY_WEIGHTS: tuple[tuple[str, float], ...] = (("momentum", 1.0),)
+
+
+# ── Búsqueda sistemática ──────────────────────────────────────────────────────
+
+# Cuatro perillas, que es el máximo que admite una búsqueda honesta sobre 609
+# operaciones. Cada una sale de una medición previa, no de una corazonada:
+#
+#   pullback_rsi_max  el embudo lo señaló como el cuello de botella (48 → 4)
+#   weights           el diagnóstico mostró que el 30% del peso va al revés
+#   adx_min           segundo mayor descarte del embudo (93 → 49)
+#   trail_atr_mult    la única palanca que mejora operaciones en vez de contarlas
+#
+# 27 combinaciones de estrategia × 3 de salida = 81 mediciones. Las tres de
+# salida son gratis: el trailing no cambia qué señales se generan, solo cómo se
+# cierran, así que las señales se generan UNA vez y se simulan tres.
+SEARCH_PULLBACK_RSI: tuple[float, ...] = (45.0, 50.0, 55.0)
+SEARCH_ADX_MIN: tuple[float, ...] = (15.0, 20.0, 25.0)
+SEARCH_TRAILS: tuple[float, ...] = (0.0, 1.5, 2.5)
+SEARCH_WEIGHTS: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = (
+    ("actual", StrategyParams().weights),
+    ("predictivo", PREDICTIVE_WEIGHTS),
+    ("momentum", MOMENTUM_ONLY_WEIGHTS),
+)
+
+
+def search_grid() -> dict[str, "StrategyParams"]:
+    """Las 27 combinaciones de estrategia que barre `backtest --search`.
+
+    El umbral de reanudación va SIEMPRE atado al de retroceso. Si el RSI "cae
+    por debajo de 55" y basta con "estar por encima de 45" para darlo por
+    reanudado, un RSI plano en 50 cumpliría las dos condiciones a la vez y la
+    búsqueda encontraría "ventaja" en un filtro que no filtra nada.
+    """
+    base = StrategyParams()
+    grid: dict[str, StrategyParams] = {}
+    for rsi in SEARCH_PULLBACK_RSI:
+        for weight_name, weights in SEARCH_WEIGHTS:
+            for adx in SEARCH_ADX_MIN:
+                label = f"rsi{rsi:.0f}·{weight_name}·adx{adx:.0f}"
+                grid[label] = replace(
+                    base,
+                    pullback_rsi_max=rsi,
+                    resume_rsi_min=rsi,
+                    adx_min=adx,
+                    weights=weights,
+                )
+    return grid
+
+
 def variants() -> dict[str, tuple["StrategyParams", "BacktestParams"]]:
     """Las variantes a comparar, cada una respondiendo UNA pregunta.
 
