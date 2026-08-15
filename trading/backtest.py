@@ -28,7 +28,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import BacktestParams, StrategyParams
+from .config import MIN_MEANINGFUL_EXPECTANCY, BacktestParams, StrategyParams
 from .risk import Calibration
 from .strategy import Signal, compute_features, signals_from_features
 from .universe import Instrument
@@ -397,23 +397,43 @@ class BacktestReport:
 
         lines = [describe("Primer tramo", first), describe("Segundo tramo", second)]
 
-        r1 = np.array([t.r_multiple for t in first]).mean()
-        r2 = np.array([t.r_multiple for t in second]).mean()
-        if r1 > 0 and r2 > 0:
+        # El veredicto se decide con el LÍMITE INFERIOR, no con la media.
+        #
+        # Antes usaba la media, y con eso el informe del 14 de agosto firmó un
+        # "✓ la ventaja aparece en los dos tramos" cuando el tramo reciente
+        # tenía media +0.174 y límite inferior +0.000: es decir, ninguna
+        # ventaja demostrada. Es el mismo error que ya se corrigió en las
+        # alertas —confundir "mayor que cero" con "demostrado"— repetido en el
+        # sitio donde más caro sale, que es el que dice si conviene operar.
+        def lower_bound(trades: list[Trade]) -> float:
+            r = np.array([t.r_multiple for t in trades])
+            if len(r) < 2:
+                return float("-inf")
+            return float(r.mean() - 1.96 * r.std(ddof=1) / np.sqrt(len(r)))
+
+        l1, l2 = lower_bound(first), lower_bound(second)
+        floor = MIN_MEANINGFUL_EXPECTANCY
+
+        if l1 >= floor and l2 >= floor:
             lines.append("\n  ✓ La ventaja aparece en los dos tramos.")
-        elif r2 <= 0 < r1:
+        elif l1 >= floor > l2:
             lines.append(
-                "\n  ✗ La ventaja solo está en el primer tramo y desaparece en el\n"
-                "    segundo. Eso apunta a ajuste a los datos, o a que el efecto\n"
-                "    dejó de funcionar. No conviene operarlo."
+                f"\n  ✗ La ventaja está demostrada en el primer tramo y NO en el\n"
+                f"    segundo (límite inferior {l2:+.3f}, hace falta {floor:+.3f}).\n"
+                "    Eso apunta a ajuste a los datos, o a que el efecto dejó de\n"
+                "    funcionar. La media del tramo reciente puede seguir siendo\n"
+                "    positiva: positiva y demostrada no son lo mismo."
             )
-        elif r1 <= 0 < r2:
+        elif l2 >= floor > l1:
             lines.append(
-                "\n  ~ Solo hay ventaja en el tramo reciente. Puede ser una mejora\n"
-                "    real del régimen de mercado, o casualidad; hace falta más muestra."
+                "\n  ~ Solo hay ventaja demostrada en el tramo reciente. Puede ser\n"
+                "    una mejora real del régimen, o casualidad; hace falta más muestra."
             )
         else:
-            lines.append("\n  ✗ Sin ventaja en ninguno de los dos tramos.")
+            lines.append(
+                f"\n  ✗ Ningún tramo demuestra ventaja (límites inferiores {l1:+.3f}\n"
+                f"    y {l2:+.3f}, hace falta {floor:+.3f} en ambos)."
+            )
         return "\n".join(lines)
 
     def headline(self) -> dict:

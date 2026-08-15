@@ -357,3 +357,15 @@ def test_a_nan_indicator_does_not_pass_a_stage():
     assert strategy._stage_ok(row, "f_market") is True
     assert strategy._stage_ok(row, "f_trend_strength") is False
     assert strategy._stage_ok(row, "no_existe") is False
+
+
+def test_the_predictive_variant_drops_every_inverted_component():
+    """Las dos invertidas se llevaban el 30% del peso puntuando al revés."""
+    from trading.config import PREDICTIVE_WEIGHTS
+
+    weights = dict(PREDICTIVE_WEIGHTS)
+    for inverted in ("momentum_12_1", "trend", "relative_strength"):
+        assert inverted not in weights
+    assert weights["momentum"] == max(weights.values()), (
+        "el único componente que predice debe pesar más que ninguno"
+    )

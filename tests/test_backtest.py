@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 
 from trading import universe
-from trading.backtest import BacktestReport, run_backtest, simulate_signal
+from trading.backtest import BacktestReport, Trade, run_backtest, simulate_signal
 from trading.config import DEFAULT_BACKTEST, DEFAULT_PARAMS, replace
 from trading.risk import Levels
 from trading.strategy import Signal
@@ -436,3 +436,59 @@ def test_letting_winners_run_needs_a_trail_to_exit():
     )
     assert trade.outcome == "win"
     assert trade.exit_price == pytest.approx(115.0)   # el objetivo sigue cerrando
+
+
+# ── El veredicto de la partición temporal ────────────────────────────────────
+# El informe del 14 de agosto firmó "✓ la ventaja aparece en los dos tramos"
+# con el tramo reciente en límite inferior +0.000. El veredicto miraba la
+# media. Es el mismo error que ya se corrigió en las alertas, en el sitio donde
+# más caro sale: el que dice si conviene operar.
+
+def _report_from_r(first_r: list[float], second_r: list[float]) -> BacktestReport:
+    report = BacktestReport()
+    dates = pd.bdate_range("2021-01-01", periods=len(first_r) + len(second_r))
+    for i, r in enumerate([*first_r, *second_r]):
+        report.trades.append(
+            Trade(
+                symbol="AAPL", asset_class="stock", signal_date=dates[i],
+                score=60.0, outcome="win" if r > 0 else "loss",
+                entry_date=dates[i], entry_price=100.0, exit_price=100.0 + r,
+                r_multiple=r, return_pct=r / 100.0,
+            )
+        )
+    return report
+
+
+def test_a_positive_but_undemonstrated_second_half_is_not_a_pass():
+    """Media positiva y ventaja demostrada no son lo mismo.
+
+    Reproduce el caso real: segundo tramo con media claramente positiva pero
+    tan disperso que su límite inferior se queda en cero.
+    """
+    rng = np.random.default_rng(7)
+    solid = list(rng.normal(0.60, 0.8, 240))     # media alta, poca dispersión
+    noisy = list(rng.normal(0.17, 3.0, 160))     # media positiva, límite ~0
+
+    text = _report_from_r(solid, noisy).out_of_sample_split()
+
+    assert "✗" in text
+    assert "positiva y demostrada no son lo mismo" in text
+
+
+def test_two_solid_halves_still_pass():
+    """El umbral no puede rechazar una ventaja que sí está demostrada."""
+    rng = np.random.default_rng(11)
+    first = list(rng.normal(0.55, 0.8, 240))
+    second = list(rng.normal(0.50, 0.8, 160))
+
+    text = _report_from_r(first, second).out_of_sample_split()
+    assert "✓ La ventaja aparece en los dos tramos" in text
+
+
+def test_neither_half_demonstrating_says_so_with_both_numbers():
+    rng = np.random.default_rng(13)
+    flat = list(rng.normal(0.0, 1.5, 240))
+    also_flat = list(rng.normal(0.0, 1.5, 160))
+
+    text = _report_from_r(flat, also_flat).out_of_sample_split()
+    assert "Ningún tramo demuestra ventaja" in text
