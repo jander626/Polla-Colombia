@@ -243,6 +243,15 @@ class Calibration:
 
     by_asset_class: dict[str, OutcomeStats] = field(default_factory=dict)
     by_score: list[OutcomeStats] = field(default_factory=list)
+    # Los mismos segmentos, medidos solo sobre el tramo RECIENTE del histórico.
+    #
+    # Existe porque el barrido del 15 de agosto encontró que la ventaja de los
+    # cinco años completos no aparece en los dos últimos: el bot estaba
+    # publicando "esperanza +0.059R, ventaja sí" mientras su propia validación
+    # decía que ese número ya no describía nada. Un promedio de cinco años que
+    # incluye un tramo alcista irrepetible no es una promesa sobre mañana.
+    recent_by_asset_class: dict[str, OutcomeStats] = field(default_factory=dict)
+    recent_label: str = ""
     generated_at: str = ""
     total_signals: int = 0
     notes: str = ""
@@ -270,18 +279,25 @@ class Calibration:
     @classmethod
     def from_outcomes(
         cls,
-        outcomes: list[tuple[str, float, bool, float]],
+        outcomes: list,
         notes: str = "",
         signature: str = "",
+        recent_fraction: float = 0.4,
     ) -> "Calibration":
-        """Construye la tabla desde (clase de activo, puntuación, ¿ganó?, R)."""
+        """Construye la tabla desde (clase de activo, puntuación, ¿ganó?, R[, fecha]).
+
+        La fecha es opcional por compatibilidad, pero sin ella no hay tramo
+        reciente que medir y la alerta pierde su única defensa contra publicar
+        la media de un periodo que ya pasó.
+        """
         by_class: dict[str, OutcomeStats] = {}
         by_score = [
             OutcomeStats(label=f"{low:.0f}-{min(high, 100):.0f}")
             for low, high in SCORE_BUCKETS
         ]
 
-        for asset_class, score, won, r_multiple in outcomes:
+        for row in outcomes:
+            asset_class, score, won, r_multiple = row[0], row[1], row[2], row[3]
             stats = by_class.setdefault(asset_class, OutcomeStats(label=asset_class))
             stats.add(won, r_multiple)
 
@@ -290,14 +306,56 @@ class Calibration:
                     bucket.add(won, r_multiple)
                     break
 
+        recent_by_class, recent_label = cls._recent_segment(outcomes, recent_fraction)
+
         return cls(
             by_asset_class=by_class,
             by_score=by_score,
+            recent_by_asset_class=recent_by_class,
+            recent_label=recent_label,
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             total_signals=len(outcomes),
             notes=notes,
             strategy_signature=signature,
         )
+
+    @staticmethod
+    def _recent_segment(
+        outcomes: list, fraction: float
+    ) -> tuple[dict[str, OutcomeStats], str]:
+        """Los mismos segmentos, sobre el último `fraction` del histórico."""
+        dated = [row for row in outcomes if len(row) > 4 and row[4] is not None]
+        if len(dated) < 40:
+            return {}, ""
+
+        dated.sort(key=lambda row: row[4])
+        cut = int(len(dated) * (1.0 - fraction))
+        recent = dated[cut:]
+        if len(recent) < 20:
+            return {}, ""
+
+        by_class: dict[str, OutcomeStats] = {}
+        for asset_class, _, won, r_multiple, _ in recent:
+            stats = by_class.setdefault(asset_class, OutcomeStats(label=asset_class))
+            stats.add(won, r_multiple)
+
+        return by_class, f"{recent[0][4]:%Y-%m}→{recent[-1][4]:%Y-%m}"
+
+    def recent_for_asset_class(self, asset_class: str) -> OutcomeStats | None:
+        stats = self.recent_by_asset_class.get(asset_class)
+        return stats if stats and stats.samples > 0 else None
+
+    def edge_decayed(self, asset_class: str) -> bool:
+        """Ventaja en el histórico completo pero no en el tramo reciente.
+
+        Es el caso que hay que gritar, no esconder: significa que el número
+        publicado viene de un periodo que ya no se parece al de ahora.
+        """
+        full = self.for_asset_class(asset_class)
+        recent = self.recent_for_asset_class(asset_class)
+        if full is None or recent is None:
+            return False
+        return full.has_edge and not recent.has_edge
 
     def for_asset_class(self, asset_class: str) -> OutcomeStats | None:
         stats = self.by_asset_class.get(asset_class)
@@ -325,7 +383,11 @@ class Calibration:
             "notes": self.notes,
             "strategy_signature": self.strategy_signature,
             "score_ranks_correctly": self.score_ranks_correctly(),
+            "recent_label": self.recent_label,
             "by_asset_class": {k: v.to_dict() for k, v in self.by_asset_class.items()},
+            "recent_by_asset_class": {
+                k: v.to_dict() for k, v in self.recent_by_asset_class.items()
+            },
             "by_score": [b.to_dict() for b in self.by_score],
         }
 
@@ -352,6 +414,11 @@ class Calibration:
                 k: OutcomeStats.from_dict(v)
                 for k, v in (raw.get("by_asset_class") or {}).items()
             },
+            recent_by_asset_class={
+                k: OutcomeStats.from_dict(v)
+                for k, v in (raw.get("recent_by_asset_class") or {}).items()
+            },
+            recent_label=raw.get("recent_label", ""),
             by_score=[OutcomeStats.from_dict(b) for b in raw.get("by_score", [])],
             generated_at=raw.get("generated_at", ""),
             total_signals=int(raw.get("total_signals", 0)),

@@ -125,6 +125,8 @@ def _confidence_block(
     stats: Optional[OutcomeStats],
     penalty: float = 0.0,
     stale: bool = False,
+    recent: Optional[OutcomeStats] = None,
+    recent_label: str = "",
 ) -> str:
     """Bloque de confianza: acierto histórico Y beneficio esperado.
 
@@ -151,7 +153,21 @@ def _confidence_block(
         f"💰 *Beneficio esperado: {expectancy:+.3f}R por operación*",
     ]
 
-    if stats.has_edge:
+    decayed = recent is not None and stats.has_edge and not recent.has_edge
+
+    if decayed:
+        # El caso que el barrido del 15 de agosto destapó: ventaja en los cinco
+        # años completos y ninguna en los dos últimos. Publicar la media larga
+        # como si describiera el mercado de ahora es la promesa más cara que
+        # puede hacer este bot, porque es la que se parece más a la verdad.
+        period = f" ({recent_label})" if recent_label else ""
+        lines.append(
+            f"     ⚠️ _La ventaja está en el histórico largo, pero NO en el tramo\n"
+            f"     reciente{period}: {recent.expectancy_lower:+.3f}R sobre "
+            f"{recent.samples} operaciones._\n"
+            "     _La cifra de arriba viene de un periodo que ya pasó._"
+        )
+    elif stats.has_edge:
         lines.append(
             f"     _De cada 100 señales así, ~{win_rate:.0f} llegan al objetivo._\n"
             "     _Gana en el agregado porque el objetivo está más lejos que el stop._"
@@ -214,6 +230,8 @@ def format_signal(
             calibration.for_asset_class(signal.asset_class),
             penalty=risk.penalty if risk is not None else 0.0,
             stale=stale_calibration,
+            recent=calibration.recent_for_asset_class(signal.asset_class),
+            recent_label=calibration.recent_label,
         ),
     ]
 

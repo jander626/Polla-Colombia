@@ -375,3 +375,80 @@ def test_a_quiet_day_stops_listing_once_nobody_is_left():
         _funnel(141, {"f_market": 141, "f_regime": 0})
     )
     assert message.count("• 0") == 1
+
+
+# ── La ventaja que se evaporó ────────────────────────────────────────────────
+# El barrido del 15 de agosto encontró que la ventaja de los cinco años
+# completos no aparece en los dos últimos. Mientras tanto la alerta seguía
+# publicando "+0.059R, ventaja sí" como si describiera el mercado de ahora.
+
+def _dated(asset_class: str, wins: int, losses: int, win_r: float, start: str):
+    """Operaciones fechadas, una por semana, con las ganadoras REPARTIDAS.
+
+    El reparto uniforme importa: agrupar las ganadoras al principio haría que
+    el tramo reciente fuese siempre el peor por construcción, y los tests
+    pasarían midiendo el fixture en vez del código.
+    """
+    total = wins + losses
+    rows = []
+    for i in range(total):
+        won = (i + 1) * wins // total > i * wins // total
+        rows.append((won, win_r if won else -1.0))
+
+    dates = pd.bdate_range(start, periods=total, freq="W")
+    return [
+        (asset_class, 72.0, won, r, date)
+        for (won, r), date in zip(rows, dates)
+    ]
+
+
+def test_an_edge_that_only_lives_in_the_old_half_is_announced():
+    """Lo que el bot llevaba días prometiendo sin base."""
+    old = _dated("stock", 130, 170, 2.6, "2021-01-01")     # ventaja clara
+    recent = _dated("stock", 55, 145, 1.4, "2024-07-01")   # se evaporó
+    calibration = Calibration.from_outcomes(old + recent)
+
+    assert calibration.for_asset_class("stock").has_edge
+    assert not calibration.recent_for_asset_class("stock").has_edge
+    assert calibration.edge_decayed("stock")
+
+    message = format_signal(make_signal(), calibration)
+    assert "NO en el tramo" in message
+    assert "un periodo que ya pasó" in message
+    # Y ya no puede afirmar lo contrario en el mismo mensaje.
+    assert "Gana en el agregado" not in message
+
+
+def test_an_edge_that_holds_up_is_not_flagged():
+    """El aviso no puede dispararse cuando la ventaja sigue ahí."""
+    old = _dated("stock", 130, 170, 2.6, "2021-01-01")
+    recent = _dated("stock", 90, 110, 2.6, "2024-07-01")
+    calibration = Calibration.from_outcomes(old + recent)
+
+    assert not calibration.edge_decayed("stock")
+    message = format_signal(make_signal(), calibration)
+    assert "Gana en el agregado" in message
+    assert "un periodo que ya pasó" not in message
+
+
+def test_without_dates_there_is_no_recent_segment_to_claim():
+    """Una calibración vieja sin fechas no puede inventarse el tramo reciente."""
+    calibration = Calibration.from_outcomes(
+        [("stock", 72.0, True, 2.5)] * 193 + [("stock", 72.0, False, -1.0)] * 356
+    )
+    assert calibration.recent_for_asset_class("stock") is None
+    assert not calibration.edge_decayed("stock")
+    assert "un periodo que ya pasó" not in format_signal(make_signal(), calibration)
+
+
+def test_the_recent_segment_survives_a_save_and_load(tmp_path):
+    """Si no persiste, el escaneo en vivo volvería a publicar la media larga."""
+    old = _dated("stock", 130, 170, 2.6, "2021-01-01")
+    recent = _dated("stock", 55, 145, 1.4, "2024-07-01")
+    path = str(tmp_path / "calibration.json")
+    Calibration.from_outcomes(old + recent).save(path)
+
+    restored = Calibration.load(path)
+    assert restored.edge_decayed("stock")
+    assert restored.recent_label
+    assert "NO en el tramo" in format_signal(make_signal(), restored)

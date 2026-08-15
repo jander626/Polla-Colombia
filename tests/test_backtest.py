@@ -600,3 +600,100 @@ def test_a_credible_winner_is_still_labelled_as_a_candidate():
 
     assert "Mejor por validación" in text
     assert "candidata, no demostrada" in text
+
+
+# ── ¿Bate a comprar y no hacer nada? ─────────────────────────────────────────
+# Una estrategia solo-largos tiene R medio positivo en un mercado alcista sin
+# necesidad de acertar nada. Estos tests fijan que el informe sepa distinguir
+# habilidad de dirección del mercado.
+
+def _traded(returns: list[float], start="2024-01-01", days_held=5):
+    """Operaciones con retorno conocido, una por semana."""
+    report = BacktestReport()
+    dates = pd.bdate_range(start, periods=len(returns) * 5, freq="B")
+    for i, r in enumerate(returns):
+        entry = dates[i * 5]
+        report.trades.append(
+            Trade(
+                symbol="AAPL", asset_class="stock", signal_date=entry,
+                score=60.0, outcome="win" if r > 0 else "loss",
+                entry_date=entry, entry_price=100.0,
+                exit_date=entry + pd.Timedelta(days=days_held),
+                exit_price=100.0 * (1 + r), r_multiple=r * 10,
+                return_pct=r, bars_held=days_held,
+            )
+        )
+    return report
+
+
+def _spy(daily_drift: float, days: int = 900, start="2024-01-01") -> pd.Series:
+    index = pd.bdate_range(start, periods=days)
+    return pd.Series(100.0 * (1 + daily_drift) ** np.arange(days), index=index)
+
+
+def test_a_strategy_that_only_rides_a_rising_market_is_called_out():
+    """El caso que hay que detectar: gana, pero menos que estar quieto."""
+    from trading.backtest import benchmark_comparison, format_benchmark
+
+    # El índice sube 0.3% diario; la estrategia gana 0.5% por operación de una
+    # semana. Positiva, y sin embargo peor que no hacer nada.
+    comparison = benchmark_comparison(_traded([0.005] * 60), _spy(0.003))
+
+    assert comparison is not None
+    assert comparison.strategy_avg > 0          # gana dinero...
+    assert comparison.excess_avg < 0            # ...y aun así pierde contra el índice
+    assert not comparison.beats_benchmark
+
+    text = format_benchmark(comparison)
+    assert "NO bate al índice" in text
+    assert "no es habilidad" in text
+
+
+def test_real_skill_is_recognised():
+    """El listón no puede descalificar a una estrategia que sí aporta."""
+    from trading.backtest import benchmark_comparison, format_benchmark
+
+    comparison = benchmark_comparison(_traded([0.05] * 60), _spy(0.0002))
+
+    assert comparison.beats_benchmark
+    assert "✓" in format_benchmark(comparison)
+    assert "habilidad" in format_benchmark(comparison)
+
+
+def test_a_positive_but_undemonstrated_excess_is_not_a_pass():
+    """Exceso medio positivo con demasiada dispersión no demuestra nada."""
+    from trading.backtest import benchmark_comparison, format_benchmark
+
+    # Media +1.0% por operación contra un índice que hace +0.2% en esas
+    # fechas: gana de media, pero con una dispersión que se lo come todo.
+    noisy = [0.16, -0.14] * 40
+    comparison = benchmark_comparison(_traded(noisy), _spy(0.0005))
+
+    assert comparison.excess_avg > 0
+    assert not comparison.beats_benchmark
+    assert "límite inferior no llega" in format_benchmark(comparison)
+
+
+def test_each_trade_is_matched_to_the_index_on_its_own_dates():
+    """Comparar contra el retorno total del índice sería tramposo.
+
+    La estrategia solo está dentro del mercado una fracción del tiempo. Lo
+    justo es preguntar qué hizo el índice EN ESOS MISMOS DÍAS, ni más ni menos.
+    """
+    from trading.backtest import benchmark_comparison
+
+    comparison = benchmark_comparison(_traded([0.0] * 60), _spy(0.001))
+
+    assert comparison.strategy_avg == pytest.approx(0.0)
+    # Cinco días naturales de índice, no los 900 del periodo completo.
+    assert 0.0 < comparison.benchmark_avg < 0.01
+    # El periodo entero rinde mucho más que cualquier ventana de cinco días:
+    # comparar contra ese total sería el sesgo que este emparejamiento evita.
+    assert comparison.benchmark_total > 20 * comparison.benchmark_avg
+
+
+def test_too_few_trades_to_compare_returns_nothing():
+    from trading.backtest import benchmark_comparison, format_benchmark
+
+    assert benchmark_comparison(_traded([0.01] * 5), _spy(0.001)) is None
+    assert "insuficiente" in format_benchmark(None)

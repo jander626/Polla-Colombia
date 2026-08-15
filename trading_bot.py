@@ -25,7 +25,14 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from trading import llm_filter, notify, universe
-from trading.backtest import compare_variants, format_search, run_backtest, run_search
+from trading.backtest import (
+    benchmark_comparison,
+    compare_variants,
+    format_benchmark,
+    format_search,
+    run_backtest,
+    run_search,
+)
 from trading.config import (
     CALIBRATION_FILE,
     DEFAULT_BACKTEST,
@@ -439,6 +446,14 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     report = run_backtest(tradable, bars, params, DEFAULT_BACKTEST, benchmark)
     print()
     print(report.summary())
+
+    # La comparación contra comprar y mantener va SIEMPRE, no detrás de una
+    # bandera. Una estrategia solo-largos tiene R medio positivo en un mercado
+    # alcista sin necesidad de acertar nada; sin este bloque, el informe deja
+    # creer que ese resultado es habilidad.
+    print()
+    print("── ¿Bate a comprar y no hacer nada? ───────────────────")
+    print(format_benchmark(benchmark_comparison(report, benchmark)))
     print()
     print("── Partición temporal (¿la ventaja aguanta?) ──────────")
     print(report.out_of_sample_split())

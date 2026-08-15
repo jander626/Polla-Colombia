@@ -287,10 +287,15 @@ class BacktestReport:
             worst = min(worst, equity - peak)
         return worst
 
-    def outcomes(self) -> list[tuple[str, float, bool, float]]:
-        """(clase de activo, puntuación, ¿ganó?, R) de cada operación ejecutada."""
+    def outcomes(self) -> list[tuple[str, float, bool, float, pd.Timestamp]]:
+        """(clase de activo, puntuación, ¿ganó?, R, fecha) de cada operación.
+
+        La fecha va incluida para que la calibración pueda medir el tramo
+        reciente por separado. Sin ella, las alertas publicarían la media de
+        cinco años como si describiera el mercado de ahora.
+        """
         return [
-            (t.asset_class, t.score, t.is_win, t.r_multiple)
+            (t.asset_class, t.score, t.is_win, t.r_multiple, t.signal_date)
             for t in self.filled
             if np.isfinite(t.r_multiple)
         ]
@@ -817,4 +822,148 @@ def format_search(results: list[SearchResult], top: int = 15) -> str:
             "  en los meses que vienen, sobre datos que todavía no existen."
         )
 
+    return "\n".join(lines)
+
+
+# ── ¿Bate a comprar y no hacer nada? ─────────────────────────────────────────
+
+@dataclass(frozen=True)
+class BenchmarkComparison:
+    """La estrategia frente a tener el dinero quieto en el índice.
+
+    Es la pregunta que nunca se hizo y que decide si todo esto sirve para algo.
+    Una estrategia solo-largos sobre acciones que suben tiene R medio positivo
+    en un mercado alcista *sin necesidad de acertar nada*: el resultado no
+    prueba habilidad, prueba que el mercado subió. Lo único que distingue las
+    dos cosas es comparar cada operación con lo que habría hecho el índice
+    **en esos mismos días**.
+
+    Ese emparejamiento por fechas es lo que hace la prueba justa en las dos
+    direcciones: no premia a la estrategia por estar fuera del mercado en las
+    caídas, ni la castiga por no estar dentro en las subidas. Solo pregunta:
+    con el dinero comprometido, ¿fue mejor esta operación que el índice?
+    """
+
+    ops: int
+    strategy_avg: float        # retorno medio por operación, neto de costes
+    benchmark_avg: float       # el índice en esas MISMAS fechas
+    excess_avg: float
+    excess_lower: float        # límite inferior del exceso
+    beat_rate: float           # fracción de operaciones que batieron al índice
+    avg_days_held: float
+    days_exposed: int          # sesiones con al menos una posición abierta
+    period_days: int
+    benchmark_total: float     # comprar y mantener durante todo el periodo
+
+    @property
+    def beats_benchmark(self) -> bool:
+        """Exceso demostrado, no solo positivo."""
+        return self.excess_lower > 0.0
+
+    @property
+    def exposure(self) -> float:
+        return self.days_exposed / self.period_days if self.period_days else 0.0
+
+
+def benchmark_comparison(
+    report: "BacktestReport", benchmark_close: pd.Series
+) -> Optional[BenchmarkComparison]:
+    """Compara cada operación con el índice en su mismo intervalo de fechas."""
+    trades = [
+        t
+        for t in report.filled
+        if t.entry_date is not None
+        and t.exit_date is not None
+        and np.isfinite(t.return_pct)
+    ]
+    if len(trades) < 30 or benchmark_close is None or benchmark_close.empty:
+        return None
+
+    index = benchmark_close.sort_index()
+
+    def price_at(when: pd.Timestamp) -> float:
+        """Último cierre conocido en esa fecha o antes.
+
+        Hace falta porque el forex opera días en los que la bolsa de EE.UU.
+        está cerrada: sin esto, esas operaciones quedarían fuera de la
+        comparación, que es justo el sesgo que se quiere evitar.
+        """
+        position = index.index.searchsorted(when, side="right") - 1
+        return float(index.iloc[position]) if position >= 0 else float("nan")
+
+    strategy, market, exposed_days = [], [], set()
+    for trade in trades:
+        entry, exit_ = price_at(trade.entry_date), price_at(trade.exit_date)
+        if not (np.isfinite(entry) and np.isfinite(exit_)) or entry <= 0:
+            continue
+        strategy.append(trade.return_pct)
+        market.append(exit_ / entry - 1.0)
+        exposed_days.update(
+            pd.bdate_range(trade.entry_date, trade.exit_date)
+        )
+
+    if len(strategy) < 30:
+        return None
+
+    s = np.array(strategy)
+    m = np.array(market)
+    excess = s - m
+    standard_error = excess.std(ddof=1) / np.sqrt(len(excess))
+
+    first = min(t.entry_date for t in trades)
+    last = max(t.exit_date for t in trades)
+    period = len(pd.bdate_range(first, last))
+
+    return BenchmarkComparison(
+        ops=len(s),
+        strategy_avg=float(s.mean()),
+        benchmark_avg=float(m.mean()),
+        excess_avg=float(excess.mean()),
+        excess_lower=float(excess.mean() - 1.96 * standard_error),
+        beat_rate=float((excess > 0).mean()),
+        avg_days_held=float(np.mean([t.bars_held for t in trades])),
+        days_exposed=len(exposed_days),
+        period_days=period,
+        benchmark_total=float(price_at(last) / price_at(first) - 1.0),
+    )
+
+
+def format_benchmark(comparison: Optional[BenchmarkComparison]) -> str:
+    if comparison is None:
+        return "Muestra insuficiente para comparar contra el índice."
+
+    c = comparison
+    lines = [
+        f"Operaciones comparadas : {c.ops}",
+        f"Días en posición (media): {c.avg_days_held:.1f}",
+        "",
+        f"Retorno medio por operación : {100 * c.strategy_avg:+.3f}%",
+        f"El índice en esas fechas    : {100 * c.benchmark_avg:+.3f}%",
+        f"Exceso sobre el índice      : {100 * c.excess_avg:+.3f}%  "
+        f"(límite inferior {100 * c.excess_lower:+.3f}%)",
+        f"Operaciones que lo batieron : {100 * c.beat_rate:.1f}%",
+        "",
+        f"Comprar y mantener el índice todo el periodo: {100 * c.benchmark_total:+.1f}%",
+        f"Exposición de la estrategia: {100 * c.exposure:.0f}% de las sesiones",
+    ]
+
+    if c.beats_benchmark:
+        lines.append(
+            "\n  ✓ La estrategia bate al índice operación a operación, y el\n"
+            "    exceso sobrevive a su propia incertidumbre. Eso es habilidad,\n"
+            "    no dirección del mercado."
+        )
+    elif c.excess_avg > 0:
+        lines.append(
+            "\n  ~ El exceso medio es positivo pero su límite inferior no llega\n"
+            f"    a cero ({100 * c.excess_lower:+.3f}%): con esta muestra no se\n"
+            "    puede distinguir de la casualidad."
+        )
+    else:
+        lines.append(
+            "\n  ✗ La estrategia NO bate al índice. Cada operación rindió menos\n"
+            "    que tener ese mismo dinero en el índice esos mismos días.\n"
+            "    El R medio positivo del informe no es habilidad: es que el\n"
+            "    mercado subió, y comprar cualquier cosa habría funcionado."
+        )
     return "\n".join(lines)
