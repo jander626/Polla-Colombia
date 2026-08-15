@@ -245,6 +245,31 @@ BASELINE_WEIGHTS: tuple[tuple[str, float], ...] = (
 )
 
 
+# Pesos que conservan solo los componentes con Δ R positiva en el diagnóstico
+# del 14 de agosto, repartidos aproximadamente según cuánto predice cada uno:
+#
+#   momentum       Δ +0.172   predice   (era 0.18)
+#   volume         Δ +0.108   ruido     (era 0.05)
+#   pullback       Δ +0.068   ruido     (era 0.30)
+#   headroom       Δ +0.059   ruido     (era 0.05)
+#   ─ fuera ────────────────────────────────────────
+#   momentum_12_1  Δ -0.247   INVERTIDO (era 0.15)
+#   trend          Δ -0.164   INVERTIDO (era 0.15)
+#   reversal       Δ -0.035   ruido     (era 0.12)
+#
+# Las dos invertidas se llevaban el 30% del peso puntuando al revés. La
+# explicación que encaja con las tres: dentro de una muestra ya filtrada a
+# "tendencia alcista + ADX fuerte + retroceso reciente", todo lo que mide
+# CUÁNTO se ha extendido el movimiento puntúa al revés, porque los valores más
+# extendidos son los que peor reanudan.
+PREDICTIVE_WEIGHTS: tuple[tuple[str, float], ...] = (
+    ("momentum", 0.40),
+    ("volume", 0.25),
+    ("pullback", 0.20),
+    ("headroom", 0.15),
+)
+
+
 def variants() -> dict[str, tuple["StrategyParams", "BacktestParams"]]:
     """Las variantes a comparar, cada una respondiendo UNA pregunta.
 
@@ -300,6 +325,14 @@ def variants() -> dict[str, tuple["StrategyParams", "BacktestParams"]]:
             replace(suave, pullback_lookback=10),
             replace(bt, trail_atr_mult=2.5, let_winners_run=True),
         ),
+        # 6 — Solo los componentes que el diagnóstico mide como predictivos.
+        #
+        # ATENCIÓN al leer esta: las cinco anteriores se definieron ANTES de
+        # ver ningún resultado; esta se eligió DESPUÉS de ver el diagnóstico
+        # del 14 de agosto, así que tiene ventaja injusta sobre la misma
+        # muestra. Su media no vale nada por sí sola: hay que creerle solo si
+        # la partición temporal aguanta, y aun así con reservas.
+        "6_solo_lo_que_predice": (replace(base, weights=PREDICTIVE_WEIGHTS), bt),
     }
 
 
