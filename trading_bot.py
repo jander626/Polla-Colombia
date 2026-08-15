@@ -25,14 +25,17 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from trading import llm_filter, notify, universe
-from trading.backtest import compare_variants, run_backtest
+from trading.backtest import compare_variants, format_search, run_backtest, run_search
 from trading.config import (
     CALIBRATION_FILE,
     DEFAULT_BACKTEST,
     DEFAULT_PARAMS,
     MAX_LLM_PENALTY,
+    SEARCH_TRAILS,
     STATE_FILE,
     StrategyParams,
+    replace,
+    search_grid,
     variants,
 )
 from trading.data import MarketData
@@ -396,6 +399,24 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     tradable = [i for i in instruments if i.symbol in bars]
     print(f"[INFO] Con datos utilizables: {len(tradable)}/{len(instruments)}")
 
+    if args.search:
+        # Barrido completo en una sola pasada. Es el modo que responde "qué
+        # habría funcionado estos años" sin ir de variante en variante, y el
+        # que hace falta cuando ya no queda una hipótesis clara que probar.
+        grid = search_grid()
+        print(
+            f"[INFO] Barriendo {len(grid)} combinaciones × {len(SEARCH_TRAILS)} "
+            f"salidas = {len(grid) * len(SEARCH_TRAILS)} mediciones"
+        )
+        results = run_search(
+            tradable, bars, grid, SEARCH_TRAILS,
+            replace(DEFAULT_BACKTEST, years=args.years), benchmark,
+        )
+        print()
+        print("── Búsqueda sistemática ───────────────────────────────")
+        print(format_search(results))
+        return 0
+
     if args.compare:
         # Se miden todas las variantes definidas a priori y se publican todas,
         # incluida la actual: sin ella no hay contra qué comparar.
@@ -514,6 +535,11 @@ def main() -> int:
         action="store_true",
         help="Compara las variantes a priori en vez de calibrar",
     )
+    p.add_argument(
+        "--search",
+        action="store_true",
+        help="Barre toda la rejilla de parámetros y ordena por validación",
+    )
     p.set_defaults(func=cmd_backtest)
 
     args = parser.parse_args()
@@ -521,7 +547,7 @@ def main() -> int:
     # definan; se rellenan para no tener que comprobar su existencia en cada uso.
     for flag, default in (
         ("offline", False), ("dry_run", False), ("force", False),
-        ("no_llm", False), ("compare", False),
+        ("no_llm", False), ("compare", False), ("search", False),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)

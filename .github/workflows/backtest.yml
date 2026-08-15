@@ -18,6 +18,10 @@ on:
         description: "Comparar las variantes en vez de calibrar (true/false)"
         required: false
         default: "false"
+      search:
+        description: "Barrer las 81 combinaciones y ordenar por validación (true/false)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write  # para commitear calibration.json
@@ -26,7 +30,7 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     # 141 instrumentos a 8 llamadas/minuto son ~20 minutos solo de descarga.
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -60,11 +64,20 @@ jobs:
           YEARS: ${{ github.event.inputs.years || '5' }}
           WRITE: ${{ github.event.inputs.write || 'true' }}
           COMPARE: ${{ github.event.inputs.compare || 'false' }}
+          SEARCH: ${{ github.event.inputs.search || 'false' }}
         run: |
           set -o pipefail
           args=(backtest --years "$YEARS")
-          [ "$COMPARE" = "true" ] && args+=(--compare)
-          [ "$WRITE" = "false" ] || args+=(--write)
+          # El barrido y la comparación solo miden: escribir la calibración
+          # desde cualquiera de los dos guardaría números de una estrategia que
+          # no es la que corre en vivo.
+          if [ "$SEARCH" = "true" ]; then
+            args+=(--search)
+          elif [ "$COMPARE" = "true" ]; then
+            args+=(--compare)
+          elif [ "$WRITE" != "false" ]; then
+            args+=(--write)
+          fi
           python trading_bot.py "${args[@]}" 2>&1 | tee backtest_output.txt
 
       # El informe se publica en el resumen del job para poder leerlo sin
