@@ -67,6 +67,13 @@ class Signal:
     score: float
     levels: Levels
     components: dict[str, float] = field(default_factory=dict)
+    # Valores de los indicadores en la vela de la señal. Un cribador tiene que
+    # poder decir POR QUÉ apareció un instrumento —"ADX 24, el RSI bajó a 41 y
+    # está reanudando"— y no solo que apareció. Con defaults para que los
+    # registros guardados antes de esto sigan cargando.
+    adx: float = float("nan")
+    rsi: float = float("nan")
+    pullback_rsi: float = float("nan")
 
     @property
     def is_forex(self) -> bool:
@@ -158,7 +165,8 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
 
     # 3 — Hubo un retroceso real: el RSI se enfrió y el precio visitó la zona
     #     de la media rápida, sin llegar a romper la tendencia de fondo.
-    rsi_dipped = out["rsi"].rolling(window, min_periods=1).min() < params.pullback_rsi_max
+    out["rsi_min"] = out["rsi"].rolling(window, min_periods=1).min()
+    rsi_dipped = out["rsi_min"] < params.pullback_rsi_max
     touched = (low <= out["ema_fast"] + params.pullback_ema_touch_atr * out["atr"])
     touched_recently = touched.rolling(window, min_periods=1).max().astype(bool)
     structure_intact = low.rolling(window, min_periods=1).min() > out["ema_slow"]
@@ -320,6 +328,9 @@ def _evaluate(
             score=score,
             levels=levels,
             components=components,
+            adx=float(row.get("adx", float("nan"))),
+            rsi=float(row.get("rsi", float("nan"))),
+            pullback_rsi=float(row.get("rsi_min", float("nan"))),
         ),
         None,
     )

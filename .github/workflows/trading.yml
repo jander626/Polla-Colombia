@@ -1,4 +1,4 @@
-name: Bot de señales de trading
+name: Cribador diario
 
 on:
   # GitHub no respeta este cron: pide cada 15 minutos y dispara dos o tres

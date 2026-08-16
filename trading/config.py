@@ -113,7 +113,12 @@ class StrategyParams:
 
     # Filtro 2 — fuerza de tendencia
     adx_period: int = 14
-    adx_min: float = 20.0
+    # 15 y no 20: con 20, el embudo dejaba 49 de 141 instrumentos vivos y la
+    # criba salía una vez por semana. El barrido midió además que 15 rinde algo
+    # MEJOR que 20 en validación (-0.013 → +0.027), aunque ninguno de los dos
+    # llegue a demostrar ventaja. Para un cribador la frecuencia sí importa:
+    # el trabajo es enseñar candidatos, no decidir por el usuario.
+    adx_min: float = 15.0
 
     # Filtro 3 — retroceso
     pullback_lookback: int = 5          # velas en las que buscar el retroceso
