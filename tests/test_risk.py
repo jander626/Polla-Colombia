@@ -11,11 +11,10 @@ import json
 
 import pytest
 
-from trading.config import DEFAULT_PARAMS, MAX_LLM_PENALTY, replace
+from trading.config import DEFAULT_PARAMS, replace
 from trading.risk import (
     Calibration,
     OutcomeStats,
-    apply_llm_penalty,
     compute_levels,
     mean_lower_bound,
     wilson_lower_bound,
@@ -330,19 +329,10 @@ def test_outcome_stats_with_zero_samples_is_safe():
     assert not stats.has_edge
 
 
-# ── Penalización del filtro de noticias ───────────────────────────────────────
-
-def test_llm_can_only_subtract_confidence():
-    """Dejar que el LLM sume reintroduciría el número inventado."""
-    assert apply_llm_penalty(70.0, -30.0, MAX_LLM_PENALTY) == 70.0
-
-
-def test_llm_penalty_is_capped():
-    assert apply_llm_penalty(70.0, 999.0, MAX_LLM_PENALTY) == 70.0 - MAX_LLM_PENALTY
-
-
-def test_confidence_never_goes_negative():
-    assert apply_llm_penalty(5.0, 25.0, MAX_LLM_PENALTY) == 0.0
+# La penalización del filtro de noticias se probaba aquí. Desapareció con la
+# confianza que penalizaba: sin porcentaje que publicar no hay nada que restar.
+# Lo que el filtro sí sigue decidiendo —retirar un candidato con un evento
+# binario cerca— se prueba en test_llm_filter.py.
 
 
 # ── Firma de la estrategia ────────────────────────────────────────────────────

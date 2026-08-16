@@ -1,25 +1,33 @@
-# Bot de señales de trading — acciones y forex
+# Cribador de Quantfury — acciones y forex
 
-Analiza el mercado una vez al día, antes de la apertura de Estados Unidos, y
-avisa por Telegram de oportunidades **solo de compra** en instrumentos
-operables en Quantfury, con precio de entrada, objetivo, stop, ratio
-riesgo/beneficio y un porcentaje de confianza calibrado.
+Revisa el mercado una vez al día, antes de la apertura de Estados Unidos, y
+manda por Telegram los instrumentos operables en Quantfury que cumplen seis
+filtros de retroceso en tendencia alcista, con la zona de entrada, el stop
+estructural y el ratio riesgo/beneficio ya calculados.
 
-> **Esto no es asesoría financiera.** Es una herramienta de cribado que evita
-> mirar 140 gráficos cada mañana. Las órdenes las colocas tú.
+> **No emite señales con ventaja demostrada, y no publica ningún porcentaje de
+> confianza.** Nació haciendo ambas cosas; dejó de hacerlas cuando cuatro
+> mediciones independientes coincidieron en que la ventaja no existe (ver
+> [Por qué es un cribador](#por-qué-es-un-cribador-y-no-un-generador-de-señales)).
+> Lo que aporta es reducir 141 gráficos a unos pocos candidatos con sus
+> niveles hechos. La decisión es tuya.
+
+> **Esto no es asesoría financiera.**
 
 ---
 
 ## Cómo funciona
 
-A las **08:30 hora de Nueva York** el bot descarga velas diarias de ~141
-instrumentos (acciones líquidas de NYSE/NASDAQ, cuatro ETFs y los 14 pares de
-divisas de Quantfury), calcula indicadores y aplica seis filtros. De los que
-sobreviven se queda con los mejores, los pasa por un filtro de noticias y
-manda la alerta.
+Entre las **06:00 y las 09:25 hora de Nueva York** el bot descarga velas
+diarias de ~141 instrumentos (acciones líquidas de NYSE/NASDAQ, cuatro ETFs y
+los 14 pares de divisas de Quantfury), calcula indicadores y aplica seis
+filtros. De los que sobreviven se queda con los mejores, los pasa por un
+filtro de noticias y manda la ficha.
 
-**Hay días que no llega nada, y es correcto.** Un bot que encuentra
-oportunidades todos los días se las está inventando.
+**Hay días que no llega nada, y es correcto.** Un cribador que encuentra algo
+todos los días no está cribando. Cuando no envía nada, el mensaje incluye el
+embudo —cuántos instrumentos sobrevivieron a cada etapa— para que un silencio
+no sea indistinguible de una avería.
 
 ### La estrategia
 
@@ -29,7 +37,7 @@ esperar a que algo que ya sube se tome un descanso y entrar cuando reanuda.
 | Filtro | Condición |
 |---|---|
 | Régimen alcista | `Close > EMA200` y `EMA50 > EMA200` |
-| Fuerza de tendencia | `ADX(14) > 20` |
+| Fuerza de tendencia | `ADX(14) > 15` |
 | Retroceso real | El RSI cayó de 45 y el precio visitó la zona de la EMA20 |
 | Reanudación | RSI cruzando al alza, MACD girando o cierre sobre el máximo previo |
 | Liquidez | Volumen medio en dólares por encima del umbral |
@@ -37,44 +45,56 @@ esperar a que algo que ya sube se tome un descanso y entrar cuando reanuda.
 
 Los niveles salen del ATR: la **entrada es un techo** (si abre con hueco
 alcista, la operación no se ejecuta), el **stop** se apoya en el mínimo del
-retroceso y el **objetivo** está a 3 ATR. Cualquier señal por debajo de 1.5 de
-ratio riesgo/beneficio se descarta.
+retroceso y el **objetivo** está a 3 ATR. Cualquier candidato por debajo de
+1.5 de ratio riesgo/beneficio se descarta.
 
-### La confianza
+Esta parte sigue siendo útil aunque los filtros no tengan ventaja demostrada:
+el stop estructural y el ratio están bien calculados, y son la mitad de la
+información que hace falta para decidir.
 
-Es la decisión de diseño central: **no la inventa un modelo de lenguaje.**
+## Por qué es un cribador y no un generador de señales
 
-Pedirle a un LLM "dame la probabilidad de que esto funcione" devuelve un
-número plausible y ficticio, que es peor que no dar ninguno porque invita a
-confiar en él. En su lugar, el backtest mide el resultado real sobre años de
-historia y publica el **límite inferior** del intervalo, que castiga la falta
-de muestra: 2 aciertos de 3 no se publican como "67%". Gemini solo puede
-**restar**, nunca sumar.
+El proyecto empezó publicando un porcentaje de confianza calibrado contra el
+backtest. Esa cifra se retiró el **16 de agosto de 2026**, cuando cuatro
+mediciones independientes sobre cinco años de datos coincidieron:
 
-Cada alerta muestra **dos cifras, no una**:
+| Medición | Resultado |
+|---|---|
+| Partición temporal | Ventaja en 2021-24 (`+0.088R`), **ninguna** en 2024-26 (`-0.013R`) |
+| Barrido de 81 combinaciones de parámetros | **0 de 81** demuestran ventaja en validación |
+| Contra comprar y mantener el índice | Exceso `+0.145%` por operación, límite inferior `-0.267%` |
+| Diagnóstico de la puntuación | 30% del peso puntuaba **al revés**; solo el 18% predecía |
+
+La tercera es la decisiva. De ese `+0.625%` que rendía una operación media,
+`+0.480%` lo habrías tenido comprando el índice esos mismos días: el **77% del
+resultado es exposición al mercado, no selección**. Y con la dispersión medida,
+demostrar el exceso restante exigiría unas 4.900 operaciones — **unos 45 años**
+al ritmo actual. Un edge que necesita 45 años para probarse es indistinguible
+de cero en cualquier horizonte útil.
+
+Publicar un "32% de confianza" sobre eso era la única parte del bot capaz de
+costar dinero de verdad: se lee como una probabilidad de acierto, y detrás no
+había nada que la sostuviera.
+
+**Lo que queda en su lugar** es una frase que dice lo que se sabe, con el
+número delante:
 
 ```
-📊 Acierto histórico: 31%
-💰 Beneficio esperado: +0.12R por operación
+En el histórico reciente (2024-07→2026-08) estos filtros NO muestran ventaja
+demostrada (-0.007R sobre 218 operaciones). Criba, no recomendación: los
+niveles están calculados, la decisión es tuya.
 ```
 
-Publicar solo el acierto engañaba. Este sistema acierta alrededor del 35% de
-las veces **y aun así gana dinero**, porque el objetivo está al doble de
-distancia que el stop. Una alerta que dijera "confianza 35%" se leería como
-"esto va a fallar", que es exactamente lo contrario de lo que significa.
+Si algún día el histórico reciente vuelve a mostrar ventaja, la misma línea lo
+dirá — y seguirá llamándose criba.
 
-Si la esperanza no sobrevive a su propio intervalo de confianza, la alerta lo
-dice: *"sin ventaja demostrada"*. Una media favorable con muestra insuficiente
-no es una ventaja, es ruido que salió a favor.
+### La medición sigue viva
 
-**La calibración se segmenta por clase de activo, no por puntuación técnica.**
-El primer backtest mostró que la puntuación no ordenaba —el tramo 60-70
-acertaba menos que el 50-60— mientras que la clase de activo discrimina con
-claridad. Los tramos de puntuación se conservan como diagnóstico, y el propio
-informe avisa cuando vuelven a ser utilizables.
-
-Sin `calibration.json` las alertas salen marcadas como **sin calibrar**, y eso
-es deliberado: un bot recién instalado no ha demostrado nada.
+`calibration.json` se sigue generando y el seguimiento de resultados también:
+son lo que permitirá detectar un cambio. El `/rendimiento` en vivo es además
+la única medición que no viene de un backtest, y por eso la única que puede
+llegar a demostrar algo. Hacen falta cientos de operaciones antes de que
+signifique nada.
 
 ---
 
@@ -87,27 +107,31 @@ es deliberado: un bot recién instalado no ha demostrado nada.
 | Secreto | Para qué | Obligatorio |
 |---|---|---|
 | `TWELVEDATA_API_KEY` | Datos de mercado ([gratis](https://twelvedata.com/pricing)) | Sí |
-| `TELEGRAM_BOT_TOKEN` | Envío de alertas (vía [@BotFather](https://t.me/BotFather)) | Sí |
+| `TELEGRAM_BOT_TOKEN` | Envío de las fichas (vía [@BotFather](https://t.me/BotFather)) | Sí |
 | `GEMINI_API_KEY` | Filtro de noticias ([AI Studio](https://aistudio.google.com/apikey)) | No |
 | `TELEGRAM_CHAT_ID` | Chat por defecto | No |
 
-Sin `GEMINI_API_KEY` el bot funciona igual, pero las alertas salen marcadas
+Sin `GEMINI_API_KEY` el bot funciona igual, pero las fichas salen marcadas
 como *sin verificación de noticias*.
 
 ### 2. Calibrar
 
-**Antes de fiarte de ninguna alerta**, ejecuta el backtest:
+El backtest ya no habilita ninguna promesa, pero sigue midiendo qué hacen
+estos filtros y genera la línea de evidencia que aparece en cada ficha:
 
 `Actions → Backtest y calibración → Run workflow`
 
 Tarda unos 20 minutos (el plan gratuito limita a 8 llamadas por minuto). Al
 terminar publica el informe en el resumen del job y commitea
-`calibration.json`. Si el R medio sale negativo, el propio informe lo dice: hay
-que ajustar parámetros antes de seguir.
+`calibration.json`. El informe incluye la comparación contra comprar y mantener
+el índice, la partición temporal y el diagnóstico por componentes.
+
+Con `search = true` barre 81 combinaciones de parámetros de una sola pasada y
+las ordena por el tramo de validación, no por el resultado total.
 
 ### 3. Activar
 
-El workflow `Bot de señales de trading` corre solo de lunes a viernes. Escribe
+El workflow `Cribador diario` corre solo de lunes a viernes. Escribe
 `/start` al bot en Telegram para registrar tu chat.
 
 ---
@@ -116,7 +140,7 @@ El workflow `Bot de señales de trading` corre solo de lunes a viernes. Escribe
 
 | Comando | Qué hace |
 |---|---|
-| `/senales` | Últimas señales cerradas |
+| `/senales` | Últimos candidatos enviados |
 | `/abiertas` | Operaciones en curso |
 | `/rendimiento` | Acierto real frente a la confianza prometida |
 | `/instrumentos` | Universo vigilado |

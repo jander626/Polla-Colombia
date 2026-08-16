@@ -44,6 +44,9 @@ def make_signal(symbol: str = "AAPL") -> Signal:
         atr_pct=0.05,
         score=72.0,
         levels=Levels(231.40, 224.10, 248.90, 2.4, 7.3, 17.5),
+        adx=23.7,
+        rsi=52.0,
+        pullback_rsi=41.0,
     )
 
 
@@ -54,9 +57,36 @@ def calibration_for(asset_class: str, wins: int, losses: int, win_r: float = 2.5
     return Calibration.from_outcomes(data)
 
 
+def dated_outcomes(asset_class: str, wins: int, losses: int, win_r: float, start: str):
+    """Operaciones fechadas con las ganadoras REPARTIDAS por todo el periodo.
+
+    El reparto uniforme importa: agrupar las ganadoras al principio haría que
+    el tramo reciente fuese el peor por construcción, y los tests pasarían
+    midiendo el fixture en vez del código.
+    """
+    total = wins + losses
+    rows = []
+    for i in range(total):
+        won = (i + 1) * wins // total > i * wins // total
+        rows.append((won, win_r if won else -1.0))
+    dates = pd.bdate_range(start, periods=total, freq="W")
+    return [(asset_class, 72.0, won, r, d) for (won, r), d in zip(rows, dates)]
+
+
 # Perfil realista: acierto bajo pero esperanza positiva por el pago asimétrico.
 CALIBRATED = calibration_for("stock", 193, 356)
 FOREX_CALIBRATED = calibration_for("forex", 31, 35)
+
+# Con tramo reciente: el caso real (ventaja en el histórico largo, no en el
+# reciente) y su contrario.
+DECAYED = Calibration.from_outcomes(
+    dated_outcomes("stock", 130, 170, 2.6, "2021-01-01")
+    + dated_outcomes("stock", 55, 145, 1.4, "2024-07-01")
+)
+LIVE_EDGE = Calibration.from_outcomes(
+    dated_outcomes("stock", 130, 170, 2.6, "2021-01-01")
+    + dated_outcomes("stock", 90, 110, 2.6, "2024-07-01")
+)
 
 
 # ── Troceado ──────────────────────────────────────────────────────────────────
@@ -93,78 +123,73 @@ def test_sanitize_removes_markdown_telegram_rejects():
 
 # ── Alertas ───────────────────────────────────────────────────────────────────
 
-def test_signal_message_contains_the_three_prices():
+def test_the_card_contains_the_three_levels():
     message = format_signal(make_signal(), CALIBRATED)
-    assert "231.40" in message   # entrada
+    assert "231.40" in message   # zona de entrada
     assert "248.90" in message   # objetivo
     assert "224.10" in message   # stop
     assert "1:2.40" in message   # riesgo/beneficio
-    assert "AAPL" in message and "COMPRA" in message
+    assert "AAPL" in message
 
 
-def test_an_uncalibrated_signal_says_so():
-    """Sin explicación, un porcentaje bajo se leería como 'muy mala señal'."""
-    message = format_signal(make_signal(), Calibration.empty())
-    assert "sin calibrar" in message.lower()
-    assert "backtest" in message.lower()
+def test_the_card_never_publishes_a_confidence_percentage():
+    """El cambio del 16 de agosto: no hay probabilidad de acierto que prometer.
 
-
-def test_the_message_shows_win_rate_and_expectancy_together():
-    """Publicar solo el acierto engaña cuando los pagos son asimétricos.
-
-    Un 35% de acierto con esperanza positiva es un buen sistema, pero leído a
-    secas parece un mal sistema. Las dos cifras tienen que ir juntas.
+    Cuatro mediciones coincidieron en que no hay ventaja demostrada. Un
+    porcentaje que se lee como "esto acierta el 32% de las veces" sobre una
+    ventaja inexistente era la única parte del bot capaz de costar dinero.
     """
     message = format_signal(make_signal(), CALIBRATED)
-    assert "Acierto histórico" in message
-    assert "Beneficio esperado" in message
-    assert "R por operación" in message
-    assert "llegan al objetivo" in message
+
+    assert "Acierto histórico" not in message
+    assert "Beneficio esperado" not in message
+    assert "Gana en el agregado" not in message
+    assert "llegan al objetivo" not in message
+    assert "COMPRA" not in message              # tampoco lo llama señal de compra
 
 
-def test_a_segment_without_a_proven_edge_is_flagged():
-    """Esperanza no demostrada: hay que decirlo, no esconderlo tras un %."""
-    thin = calibration_for("stock", 6, 11)
-    message = format_signal(make_signal(), thin)
-    assert "Sin ventaja demostrada" in message
-
-
-def test_a_low_sample_segment_is_flagged():
-    message = format_signal(make_signal("EUR/USD"), calibration_for("forex", 8, 9))
-    assert "poco fiable" in message.lower()
-
-
-def test_a_reliable_segment_is_not_flagged_as_unreliable():
+def test_the_card_says_why_the_instrument_appeared():
+    """Es el producto del cribador: sin el porqué, solo es un símbolo suelto."""
     message = format_signal(make_signal(), CALIBRATED)
-    assert "poco fiable" not in message.lower()
+
+    assert "ADX 24" in message
+    assert "RSI bajó a 41" in message
+    assert "reanudando" in message
+    assert "tendencia alcista" in message
 
 
-def test_the_signal_uses_its_own_asset_class(monkeypatch):
-    """Una señal de forex no puede calibrarse con el histórico de acciones."""
-    both = Calibration.from_outcomes(
-        [("stock", 72.0, True, 2.5)] * 193 + [("stock", 72.0, False, -1.0)] * 356
-        + [("forex", 72.0, True, 2.5)] * 31 + [("forex", 72.0, False, -1.0)] * 35
-    )
-    stock_msg = format_signal(make_signal("AAPL"), both)
-    forex_msg = format_signal(make_signal("EUR/USD"), both)
-    assert stock_msg != forex_msg
+def test_the_card_calls_itself_a_screen_not_a_recommendation():
+    message = format_signal(make_signal(), CALIBRATED)
+    assert "no recomendación" in message
+    assert "la decisión es tuya" in message.lower()
 
 
-def test_an_unverified_signal_says_so():
-    """'Sin verificar' y 'sin riesgo' son cosas muy distintas."""
-    message = format_signal(make_signal(), CALIBRATED, risk=None)
-    assert "Sin verificación de noticias" in message
+def test_a_decayed_edge_is_stated_as_a_fact():
+    """Sin ventaja reciente, la ficha lo dice con el número delante."""
+    message = format_signal(make_signal(), DECAYED)
+    assert "NO muestran ventaja demostrada" in message
+    assert DECAYED.recent_label in message
+    assert "operaciones" in message
 
 
-def test_event_risk_is_shown_and_lowers_the_win_rate():
-    risk = EventRisk("low", 10.0, "Tendencia intacta.", "Dato de empleo el viernes.")
-    with_risk = format_signal(make_signal(), CALIBRATED, risk=risk)
-    without = format_signal(make_signal(), CALIBRATED)
+def test_a_live_edge_is_reported_without_becoming_a_promise():
+    """Aunque el histórico reciente sí aguante, sigue siendo una criba."""
+    message = format_signal(make_signal(), LIVE_EDGE)
+    assert "sí muestran ventaja" in message
+    # Ni siquiera con ventaja viva se convierte en recomendación.
+    assert "Criba, no recomendación" in message
 
-    assert "Tendencia intacta" in with_risk
-    assert "empleo" in with_risk
-    assert "10 puntos" in with_risk
-    assert with_risk != without
+
+def test_an_uncalibrated_screen_says_so():
+    message = format_signal(make_signal(), Calibration.empty())
+    assert "Sin histórico aplicable" in message
+
+
+def test_a_stale_calibration_does_not_get_quoted():
+    """Cifras de otra versión de los filtros no describen este candidato."""
+    message = format_signal(make_signal(), DECAYED, stale_calibration=True)
+    assert "Sin histórico aplicable" in message
+    assert DECAYED.recent_label not in message
 
 
 def test_forex_prices_use_more_decimals():
@@ -176,9 +201,23 @@ def test_forex_prices_use_more_decimals():
     assert "PAR" in message
 
 
-def test_no_signals_message_explains_why_thats_fine():
+def test_an_unverified_candidate_says_so():
+    """'Sin verificar' y 'sin riesgo' son cosas muy distintas."""
+    message = format_signal(make_signal(), CALIBRATED, risk=None)
+    assert "Sin verificación de noticias" in message
+
+
+def test_event_risk_context_is_shown():
+    risk = EventRisk("low", 10.0, "Tendencia intacta.", "Dato de empleo el viernes.")
+    message = format_signal(make_signal(), CALIBRATED, risk=risk)
+
+    assert "Tendencia intacta" in message
+    assert "empleo" in message
+
+
+def test_no_candidates_message_explains_why_thats_fine():
     message = format_no_signals()
-    assert "inventando" in message or "inventa" in message
+    assert "no está cribando" in message
 
 
 # ── Cierres y rendimiento ─────────────────────────────────────────────────────
@@ -206,70 +245,28 @@ def test_performance_without_data():
     assert "Todavía no hay" in format_performance({"closed": 0})
 
 
-def test_performance_compares_promise_against_reality():
-    """Es el control externo de la calibración: debe verse en el mensaje."""
+def test_performance_reports_live_results_without_promising_anything():
+    """Es la única medición que no viene de un backtest, y hay que decirlo.
+
+    Antes comparaba el acierto real contra la confianza prometida. Ya no hay
+    confianza prometida: lo que queda es el resultado en vivo, con el aviso de
+    que hacen falta cientos de operaciones antes de que signifique algo.
+    """
     message = format_performance(
         {
             "closed": 20, "wins": 11, "win_rate": 0.55, "avg_r": 0.42,
-            "total_r": 8.4, "open": 3, "avg_confidence": 58.0,
+            "total_r": 8.4, "open": 3,
         }
     )
-    assert "55.0%" in message or "55%" in message
-    assert "58%" in message
-    assert "calibración está mal" in message
+    assert "55.0%" in message
+    assert "+0.42" in message
+    assert "no viene de un backtest" in message
+    assert "cientos de operaciones" in message
+    assert "prometida" not in message
 
 
 def test_help_warns_it_is_not_financial_advice():
     assert "asesoría financiera" in format_help()
-
-
-# ── Fallos encontrados en la primera alerta real ──────────────────────────────
-
-def test_a_tiny_edge_is_not_announced_as_a_winner():
-    """El fallo de la primera alerta real: '+0.00R' y 'gana en el agregado'.
-
-    Una esperanza de +0.005R es positiva y económicamente nada. Con dos
-    decimales se imprimía como +0.00R mientras el texto afirmaba que ganaba.
-    Ahora debe reconocerse como insuficiente.
-    """
-    # Reproduce el caso real: media +0.160R, mínimo +0.028R. Positivo, pero
-    # por debajo de lo que hace falta para que la operación valga la pena.
-    tiny = calibration_for("stock", 193, 356, win_r=2.3)
-    stats = tiny.for_asset_class("stock")
-    assert stats is not None
-    assert 0 < stats.expectancy_lower < 0.05     # positiva pero minúscula
-    assert not stats.has_edge
-
-    message = format_signal(make_signal(), tiny)
-    assert "demasiado pequeña" in message
-    assert "Gana en el agregado" not in message
-
-
-def test_expectancy_is_shown_with_enough_precision():
-    """Con dos decimales, una ventaja pequeña se imprimía como '+0.00R'."""
-    message = format_signal(make_signal(), calibration_for("stock", 193, 356, win_r=2.3))
-    assert "+0.00R" not in message      # el formato viejo, ambiguo
-    assert "R por operación" in message
-
-
-def test_a_real_edge_is_still_announced_as_such():
-    """El umbral no puede silenciar una ventaja que sí es útil."""
-    message = format_signal(make_signal(), CALIBRATED)
-    assert "Gana en el agregado" in message
-    assert "demasiado pequeña" not in message
-
-
-def test_a_stale_calibration_is_announced():
-    """Calibrar, cambiar la estrategia y seguir publicando las cifras viejas.
-
-    Pasó de verdad: se calibró a las 04:07, la estrategia cambió a las 04:24, y
-    el bot siguió mostrando la confianza de la versión anterior sin avisar.
-    """
-    fresh = format_signal(make_signal(), CALIBRATED, stale_calibration=False)
-    stale = format_signal(make_signal(), CALIBRATED, stale_calibration=True)
-
-    assert "versión anterior" in stale
-    assert "versión anterior" not in fresh
 
 
 # ── El escaneo mudo del 11 de agosto ─────────────────────────────────────────
@@ -281,7 +278,7 @@ def test_the_header_reports_what_will_actually_be_sent():
     abierta, y la cabecera igual dijo "1". Después, silencio.
     """
     header = format_scan_header(3, 1, already_open=["ABBV"], event_risk=["NVDA"])
-    assert "detectadas: *3*" in header
+    assert "Cumplen los filtros: *3*" in header
     assert "Se envían: *1*" in header
     assert "ABBV" in header and "posición abierta" in header
     assert "NVDA" in header and "riesgo de evento" in header
@@ -297,7 +294,7 @@ def test_a_fully_filtered_scan_explains_itself():
     """El caso exacto que dejó al usuario sin saber si el bot estaba roto."""
     message = format_all_filtered(1, already_open=["ABBV"], event_risk=[])
 
-    assert "ninguna se envía" in message
+    assert "ninguno se envía" in message
     assert "ABBV" in message
     assert "posición abierta" in message
     # Y explica el porqué de la regla, no solo el hecho.
@@ -314,7 +311,7 @@ def test_a_fully_filtered_scan_by_event_risk():
 def test_a_fully_filtered_scan_without_a_known_reason():
     """Aun sin motivo identificable, hay que decir que no se envía nada."""
     message = format_all_filtered(1, already_open=[], event_risk=[])
-    assert "ninguna se envía" in message
+    assert "ninguno se envía" in message
     assert "Sin candidatos" in message
 
 
@@ -329,7 +326,7 @@ def _funnel(evaluated: int, counts: dict[str, int]):
 
 def test_a_quiet_day_without_a_funnel_still_works():
     """La firma vieja se sigue usando en los tests y en cualquier llamada suelta."""
-    assert "criterios" in format_no_signals()
+    assert "filtros" in format_no_signals()
 
 
 def test_a_quiet_day_shows_where_the_candidates_died():
@@ -378,77 +375,13 @@ def test_a_quiet_day_stops_listing_once_nobody_is_left():
 
 
 # ── La ventaja que se evaporó ────────────────────────────────────────────────
-# El barrido del 15 de agosto encontró que la ventaja de los cinco años
-# completos no aparece en los dos últimos. Mientras tanto la alerta seguía
-# publicando "+0.059R, ventaja sí" como si describiera el mercado de ahora.
-
-def _dated(asset_class: str, wins: int, losses: int, win_r: float, start: str):
-    """Operaciones fechadas, una por semana, con las ganadoras REPARTIDAS.
-
-    El reparto uniforme importa: agrupar las ganadoras al principio haría que
-    el tramo reciente fuese siempre el peor por construcción, y los tests
-    pasarían midiendo el fixture en vez del código.
-    """
-    total = wins + losses
-    rows = []
-    for i in range(total):
-        won = (i + 1) * wins // total > i * wins // total
-        rows.append((won, win_r if won else -1.0))
-
-    dates = pd.bdate_range(start, periods=total, freq="W")
-    return [
-        (asset_class, 72.0, won, r, date)
-        for (won, r), date in zip(rows, dates)
-    ]
-
-
-def test_an_edge_that_only_lives_in_the_old_half_is_announced():
-    """Lo que el bot llevaba días prometiendo sin base."""
-    old = _dated("stock", 130, 170, 2.6, "2021-01-01")     # ventaja clara
-    recent = _dated("stock", 55, 145, 1.4, "2024-07-01")   # se evaporó
-    calibration = Calibration.from_outcomes(old + recent)
-
-    assert calibration.for_asset_class("stock").has_edge
-    assert not calibration.recent_for_asset_class("stock").has_edge
-    assert calibration.edge_decayed("stock")
-
-    message = format_signal(make_signal(), calibration)
-    assert "NO en el tramo" in message
-    assert "un periodo que ya pasó" in message
-    # Y ya no puede afirmar lo contrario en el mismo mensaje.
-    assert "Gana en el agregado" not in message
-
-
-def test_an_edge_that_holds_up_is_not_flagged():
-    """El aviso no puede dispararse cuando la ventaja sigue ahí."""
-    old = _dated("stock", 130, 170, 2.6, "2021-01-01")
-    recent = _dated("stock", 90, 110, 2.6, "2024-07-01")
-    calibration = Calibration.from_outcomes(old + recent)
-
-    assert not calibration.edge_decayed("stock")
-    message = format_signal(make_signal(), calibration)
-    assert "Gana en el agregado" in message
-    assert "un periodo que ya pasó" not in message
-
-
-def test_without_dates_there_is_no_recent_segment_to_claim():
-    """Una calibración vieja sin fechas no puede inventarse el tramo reciente."""
-    calibration = Calibration.from_outcomes(
-        [("stock", 72.0, True, 2.5)] * 193 + [("stock", 72.0, False, -1.0)] * 356
-    )
-    assert calibration.recent_for_asset_class("stock") is None
-    assert not calibration.edge_decayed("stock")
-    assert "un periodo que ya pasó" not in format_signal(make_signal(), calibration)
-
 
 def test_the_recent_segment_survives_a_save_and_load(tmp_path):
-    """Si no persiste, el escaneo en vivo volvería a publicar la media larga."""
-    old = _dated("stock", 130, 170, 2.6, "2021-01-01")
-    recent = _dated("stock", 55, 145, 1.4, "2024-07-01")
+    """Si no persiste, la ficha volvería a decir que no hay histórico reciente."""
     path = str(tmp_path / "calibration.json")
-    Calibration.from_outcomes(old + recent).save(path)
+    DECAYED.save(path)
 
     restored = Calibration.load(path)
+    assert restored.recent_for_asset_class("stock") is not None
     assert restored.edge_decayed("stock")
-    assert restored.recent_label
-    assert "NO en el tramo" in format_signal(make_signal(), restored)
+    assert "NO muestran ventaja demostrada" in format_signal(make_signal(), restored)

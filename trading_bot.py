@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
-"""Punto de entrada del bot de señales de trading.
+"""Punto de entrada del cribador de Quantfury.
 
     python trading_bot.py auto        Lo que ejecuta el cron: comandos,
-                                      seguimiento y escaneo si toca
-    python trading_bot.py scan        Fuerza el escaneo ahora
+                                      seguimiento y criba si toca
+    python trading_bot.py scan        Fuerza la criba ahora
     python trading_bot.py track       Solo revisa las operaciones abiertas
     python trading_bot.py poll        Solo atiende comandos de Telegram
-    python trading_bot.py backtest    Mide la ventaja y calibra la confianza
+    python trading_bot.py backtest    Mide qué hacen estos filtros
     python trading_bot.py test        Envía un mensaje de prueba
 
 El bot no se conecta a Quantfury —no existe API pública de trading—, así que
-alerta y las órdenes las coloca el usuario a mano. Quantfury interviene como
-restricción de universo: solo se recomienda lo que se puede comprar allí.
+las órdenes las coloca el usuario a mano. Quantfury interviene como
+restricción de universo: solo se criba lo que se puede comprar allí.
+
+**Es un cribador, no un generador de señales.** Nació como lo segundo y se
+convirtió en lo primero el 16 de agosto de 2026, cuando cuatro mediciones
+independientes coincidieron: la ventaja del histórico completo no aparece en
+el tramo reciente, ninguna de 81 combinaciones de parámetros la recupera, el
+exceso sobre comprar y mantener el índice es indistinguible de cero, y la
+puntuación técnica no ordena. Publicar un porcentaje de confianza sobre eso
+habría sido la única parte del bot capaz de costar dinero de verdad.
+
+Lo que sí aporta: reduce 141 gráficos a los pocos que cumplen seis filtros, y
+deja calculados la zona de entrada, el stop estructural y el ratio
+riesgo/beneficio. La decisión es del usuario.
 """
 
 from __future__ import annotations
@@ -37,7 +49,6 @@ from trading.config import (
     CALIBRATION_FILE,
     DEFAULT_BACKTEST,
     DEFAULT_PARAMS,
-    MAX_LLM_PENALTY,
     SEARCH_TRAILS,
     STATE_FILE,
     StrategyParams,
@@ -46,7 +57,7 @@ from trading.config import (
     variants,
 )
 from trading.data import MarketData
-from trading.risk import Calibration, apply_llm_penalty
+from trading.risk import Calibration
 from trading.schedule import should_scan
 from trading.state import TradingState
 from trading.strategy import Signal, scan_with_funnel
@@ -129,19 +140,18 @@ def _prepare_delivery(
     candidates = available[: params.max_signals_per_scan]
 
     for signal in candidates:
-        stats = calibration.for_asset_class(signal.asset_class)
-        confidence = stats.win_rate_lower if stats else 0.0
-
+        # Ya no se calcula una confianza que publicar: el cribador no promete
+        # una probabilidad de acierto porque no hay ninguna demostrada. Se
+        # sigue registrando el candidato para poder medir en vivo qué pasó
+        # con él, que es la única evidencia que no viene de un backtest.
         risk = llm_filter.check(signal) if use_llm else None
-        if risk is not None:
-            if risk.is_blocking:
-                print(f"[INFO] {signal.symbol} descartada: riesgo de evento alto")
-                delivery.event_risk.append(signal.symbol)
-                continue
-            confidence = apply_llm_penalty(confidence, risk.penalty, MAX_LLM_PENALTY)
+        if risk is not None and risk.is_blocking:
+            print(f"[INFO] {signal.symbol} descartado: riesgo de evento alto")
+            delivery.event_risk.append(signal.symbol)
+            continue
 
         message = notify.format_signal(signal, calibration, risk, stale_calibration)
-        delivery.messages.append((signal, message, confidence))
+        delivery.messages.append((signal, message, 0.0))
 
     return delivery
 
@@ -248,13 +258,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
             state.save(STATE_FILE)
         return 0
 
-    print(f"[INFO] Señales detectadas: {len(signals)}")
+    print(f"[INFO] Cumplen los filtros: {len(signals)}")
     delivery = _prepare_delivery(
         signals, state, calibration, params,
         use_llm=not args.no_llm, stale_calibration=stale,
     )
     delivered = _send_delivery(delivery, state, client, dry_run=args.dry_run)
-    print(f"[INFO] Señales entregadas: {delivered}")
+    print(f"[INFO] Fichas entregadas: {delivered}")
 
     if not args.dry_run:
         from trading.schedule import now_ny

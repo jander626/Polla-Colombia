@@ -121,84 +121,74 @@ def _fmt(value: float, instrument: Instrument) -> str:
     return f"{value:.{instrument.price_decimals}f}"
 
 
-def _confidence_block(
-    stats: Optional[OutcomeStats],
-    penalty: float = 0.0,
+def _evidence_line(
+    calibration: Calibration,
+    asset_class: str,
     stale: bool = False,
-    recent: Optional[OutcomeStats] = None,
-    recent_label: str = "",
 ) -> str:
-    """Bloque de confianza: acierto histórico Y beneficio esperado.
+    """Qué dice el histórico. Un hecho, no una promesa.
 
-    Publicar solo el acierto engañaba. Este sistema acierta alrededor del 35% de
-    las veces y aun así gana dinero, porque el objetivo está al doble de
-    distancia que el stop; una alerta que dijera «confianza 35%» se leería como
-    «esto va a fallar», que es justo lo contrario. Las dos cifras juntas, con la
-    explicación, es lo único honesto.
+    Aquí vivía `_confidence_block`, que publicaba "acierto histórico 32%,
+    beneficio esperado +0.053R". Se retiró cuando cuatro mediciones
+    independientes coincidieron en que ese número no describe nada operable:
+
+      - La partición temporal: ventaja en 2021-24, nada en 2024-26.
+      - El barrido de 81 combinaciones: ninguna pasa la validación.
+      - Contra comprar y mantener: el exceso es indistinguible de cero, y
+        harían falta ~45 años de datos para demostrarlo al tamaño que tiene.
+      - El diagnóstico: la puntuación no ordena.
+
+    Un porcentaje que se lee como probabilidad de acierto, cuando detrás no
+    hay ventaja demostrada, es la parte del bot que podía costar dinero de
+    verdad. Lo que queda es una frase que dice lo que se sabe.
     """
-    if stats is None or stats.samples == 0:
+    cierre = (
+        "Criba, no recomendación: los niveles están calculados, "
+        "la decisión es tuya."
+    )
+
+    if not calibration.is_calibrated or stale:
+        return f"_Sin histórico aplicable a esta versión de los filtros. {cierre}_"
+
+    recent = calibration.recent_for_asset_class(asset_class)
+    period = f" ({calibration.recent_label})" if calibration.recent_label else ""
+
+    if recent is None:
         return (
-            "📊 *Sin calibrar*\n"
-            "     _No hay histórico para este tipo de instrumento._\n"
-            "     _Ejecuta el backtest antes de fiarte de esta señal._"
+            "_No hay histórico reciente suficiente para esta clase de activo. "
+            f"{cierre}_"
         )
+    if not recent.has_edge:
+        return (
+            f"_En el histórico reciente{period} estos filtros NO muestran ventaja "
+            f"demostrada ({recent.expectancy_lower:+.3f}R sobre {recent.samples} "
+            f"operaciones). {cierre}_"
+        )
+    return (
+        f"_En el histórico reciente{period} estos filtros sí muestran ventaja "
+        f"({recent.expectancy_lower:+.3f}R sobre {recent.samples} operaciones). "
+        f"{cierre}_"
+    )
 
-    win_rate = max(0.0, stats.win_rate_lower - penalty)
-    expectancy = stats.expectancy_lower
 
-    lines = [
-        f"📊 *Acierto histórico: {win_rate:.0f}%*",
-        # Tres decimales, no dos: con dos, una ventaja de +0.005R se imprimía
-        # como "+0.00R" mientras el texto afirmaba que la señal ganaba.
-        f"💰 *Beneficio esperado: {expectancy:+.3f}R por operación*",
-    ]
+def _filters_passed(signal: Signal) -> list[str]:
+    """Por qué apareció este instrumento. Es el producto del cribador.
 
-    decayed = recent is not None and stats.has_edge and not recent.has_edge
-
-    if decayed:
-        # El caso que el barrido del 15 de agosto destapó: ventaja en los cinco
-        # años completos y ninguna en los dos últimos. Publicar la media larga
-        # como si describiera el mercado de ahora es la promesa más cara que
-        # puede hacer este bot, porque es la que se parece más a la verdad.
-        period = f" ({recent_label})" if recent_label else ""
+    Sin esto, la tarjeta solo dice "aquí tienes un símbolo": el usuario no
+    puede juzgar el candidato ni descartarlo con criterio propio, que es
+    justo lo que un cribador tiene que permitirle hacer.
+    """
+    lines = ["✓ En tendencia alcista (cierre sobre la EMA200, EMA50 sobre EMA200)"]
+    if signal.adx == signal.adx:                      # descarta NaN
+        lines.append(f"✓ Con fuerza de tendencia (ADX {signal.adx:.0f})")
+    if signal.pullback_rsi == signal.pullback_rsi:
         lines.append(
-            f"     ⚠️ _La ventaja está en el histórico largo, pero NO en el tramo\n"
-            f"     reciente{period}: {recent.expectancy_lower:+.3f}R sobre "
-            f"{recent.samples} operaciones._\n"
-            "     _La cifra de arriba viene de un periodo que ya pasó._"
+            f"✓ Retrocedió a la zona de la EMA20 (el RSI bajó a {signal.pullback_rsi:.0f})"
         )
-    elif stats.has_edge:
-        lines.append(
-            f"     _De cada 100 señales así, ~{win_rate:.0f} llegan al objetivo._\n"
-            "     _Gana en el agregado porque el objetivo está más lejos que el stop._"
-        )
-    elif expectancy > 0:
-        # Positiva pero demasiado pequeña para servir de algo: se la come el
-        # primer slippage. Decirlo es más útil que redondearla a cero y callar.
-        lines.append(
-            "     ⚠️ _Ventaja demasiado pequeña para ser útil: la absorbería el\n"
-            "     coste de operar. Trátala como informativa._"
-        )
-    else:
-        lines.append(
-            "     ⚠️ _Sin ventaja demostrada en el histórico para esta clase de\n"
-            "     activo. Trátala como informativa, no como recomendación._"
-        )
-
-    if stale:
-        lines.append(
-            "     🔄 _Calibración de una versión anterior de la estrategia:\n"
-            "     estas cifras no describen esta señal. Vuelve a calibrar._"
-        )
-
-    if not stats.is_reliable:
-        lines.append(
-            f"     _Solo {stats.samples} operaciones históricas: poco fiable._"
-        )
-    if penalty > 0:
-        lines.append(f"     _Acierto reducido en {penalty:.0f} puntos por riesgo de evento._")
-
-    return "\n".join(lines)
+    if signal.rsi == signal.rsi:
+        lines.append(f"✓ Está reanudando (RSI {signal.rsi:.0f} y subiendo)")
+    lines.append(f"✓ Volatilidad en rango (ATR {100 * signal.atr_pct:.1f}% del precio)")
+    return lines
 
 
 def format_signal(
@@ -207,32 +197,27 @@ def format_signal(
     risk: Optional[EventRisk] = None,
     stale_calibration: bool = False,
 ) -> str:
-    """Mensaje de alerta de compra.
+    """Ficha de un instrumento que pasó la criba.
 
-    Incluye siempre stop y ratio riesgo/beneficio: sin stop, el porcentaje de
-    confianza no significa nada, porque una sola operación sin limitar puede
-    borrar diez ganadoras.
+    Ya no es una señal de compra: es un candidato con sus niveles calculados
+    y el motivo por el que aparece. Incluye siempre stop y ratio
+    riesgo/beneficio, porque un nivel de entrada sin el riesgo al lado es la
+    mitad de la información que hace falta para decidir.
     """
     instrument = get_instrument(signal.symbol)
     levels = signal.levels
     kind = "PAR" if signal.is_forex else "ACCIÓN"
 
     lines = [
-        f"🟢 *COMPRA — {signal.symbol}*",
-        f"_{instrument.name} · {kind}_",
+        f"🔎 *{signal.symbol}* — {instrument.name}",
+        f"_{kind}_",
         "",
-        f"📥 Entrada: hasta *{_fmt(levels.entry_max, instrument)}*",
-        f"🎯 Objetivo: *{_fmt(levels.target, instrument)}*",
-        f"🛑 Stop: *{_fmt(levels.stop, instrument)}*",
+        *_filters_passed(signal),
+        "",
+        f"📥 Zona de entrada: hasta *{_fmt(levels.entry_max, instrument)}*",
+        f"🛑 Stop estructural: *{_fmt(levels.stop, instrument)}*",
+        f"🎯 Objetivo (3 ATR): *{_fmt(levels.target, instrument)}*",
         f"⚖️ Riesgo/beneficio: *1:{levels.risk_reward:.2f}*",
-        "",
-        _confidence_block(
-            calibration.for_asset_class(signal.asset_class),
-            penalty=risk.penalty if risk is not None else 0.0,
-            stale=stale_calibration,
-            recent=calibration.recent_for_asset_class(signal.asset_class),
-            recent_label=calibration.recent_label,
-        ),
     ]
 
     if risk is not None and risk.rationale:
@@ -240,11 +225,12 @@ def format_signal(
     if risk is not None and risk.risks:
         lines += [f"⚠️ {sanitize(risk.risks)}"]
     if risk is None:
-        lines += ["", "_Sin verificación de noticias en esta señal._"]
+        lines += ["", "_Sin verificación de noticias en este candidato._"]
 
     lines += [
         "",
-        f"📈 Puntuación técnica: {signal.score:.0f}/100",
+        _evidence_line(calibration, signal.asset_class, stale_calibration),
+        "",
         f"🕯️ Calculado con el cierre del {signal.bar_date:%d/%m/%Y}",
     ]
     return "\n".join(lines)
@@ -277,9 +263,9 @@ def format_scan_header(
     llegó ninguna señal ni ninguna explicación.
     """
     lines = [
-        "📡 *ESCANEO DIARIO*",
+        "📡 *CRIBA DIARIA*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Oportunidades detectadas: *{count}*",
+        f"Cumplen los filtros: *{count}*",
     ]
     if shown < count:
         lines.append(f"Se envían: *{shown}*")
@@ -299,9 +285,9 @@ def format_all_filtered(
     fue exactamente lo que ocurrió el 11 de agosto.
     """
     lines = [
-        "📡 *ESCANEO DIARIO*",
+        "📡 *CRIBA DIARIA*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Se detectaron *{count}* oportunidades, pero ninguna se envía.",
+        f"*{count}* instrumentos cumplen los filtros, pero ninguno se envía.",
         "",
         "_Motivo:_",
     ]
@@ -325,9 +311,9 @@ def format_no_signals(funnel=None) -> str:
     averiado. Con él, cada silencio viene firmado.
     """
     parts = [
-        "📡 *ESCANEO DIARIO*",
+        "📡 *CRIBA DIARIA*",
         "━━━━━━━━━━━━━━━━━━━━",
-        "Hoy no hay ninguna oportunidad que cumpla los criterios.",
+        "Hoy ningún instrumento cumple los filtros.",
     ]
 
     if funnel is not None and funnel.evaluated:
@@ -347,7 +333,7 @@ def format_no_signals(funnel=None) -> str:
             parts.append(f"_El filtro que más descartó hoy: {label} ({dropped})._")
 
     parts.append("")
-    parts.append("_Un bot que encuentra señales todos los días se las está inventando._")
+    parts.append("_Un cribador que encuentra algo todos los días no está cribando._")
     return "\n".join(parts)
 
 
@@ -398,30 +384,33 @@ def format_performance(stats: dict) -> str:
         f"Resultado acumulado: *{stats['total_r']:+.1f}R*",
         f"Abiertas ahora: {stats.get('open', 0)}",
     ]
-    promised = stats.get("avg_confidence")
-    if promised:
-        lines += [
-            "",
-            f"Confianza media prometida: {promised:.0f}%",
-            f"Acierto real: {stats['win_rate'] * 100:.0f}%",
-            "_Si el acierto real queda muy por debajo de lo prometido de forma"
-            " sostenida, la calibración está mal y hay que rehacer el backtest._",
-        ]
+    lines += [
+        "",
+        "_Estos son resultados en vivo sobre los candidatos que se enviaron._",
+        "_Es la única medición que no viene de un backtest, y por eso la única"
+        " que puede llegar a demostrar algo sobre estos filtros. Hacen falta"
+        " cientos de operaciones antes de que signifique nada._",
+    ]
     return "\n".join(lines)
 
 
 def format_help() -> str:
     return (
-        "🤖 *Bot de señales de trading*\n\n"
-        "Analiza acciones y pares de forex operables en Quantfury una vez al "
-        "día, antes de la apertura de EE.UU., y avisa solo de oportunidades de "
-        "*compra*.\n\n"
+        "🤖 *Cribador de Quantfury*\n\n"
+        "Revisa cada día, antes de la apertura de EE.UU., las acciones y pares "
+        "de forex operables en Quantfury, y te enseña los que cumplen seis "
+        "filtros de retroceso en tendencia alcista — con su zona de entrada, "
+        "su stop estructural y su ratio riesgo/beneficio ya calculados.\n\n"
+        "*No emite señales con ventaja demostrada.* Cuatro mediciones "
+        "independientes sobre cinco años coinciden en que estos filtros no "
+        "baten al índice de forma distinguible del azar. Lo que hace es "
+        "ahorrarte mirar 141 gráficos cada mañana; la decisión es tuya.\n\n"
         "Comandos:\n"
-        "• /senales — Últimas señales enviadas\n"
+        "• /senales — Últimos candidatos enviados\n"
         "• /abiertas — Operaciones en curso\n"
-        "• /rendimiento — Aciertos reales frente a la confianza prometida\n"
+        "• /rendimiento — Resultado real de lo que se cribó\n"
         "• /instrumentos — Universo vigilado\n"
         "• /ayuda — Este mensaje\n\n"
         "_Esto no es asesoría financiera. Las órdenes las colocas tú en "
-        "Quantfury; el bot solo criba el mercado._"
+        "Quantfury._"
     )
