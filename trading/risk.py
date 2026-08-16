@@ -469,12 +469,8 @@ class Calibration:
         return "\n".join(lines)
 
 
-def apply_llm_penalty(confidence: float, penalty: float, max_penalty: float) -> float:
-    """Aplica la penalización por riesgo de evento.
-
-    El filtro de noticias solo puede *restar*. Dejarle sumar confianza
-    reintroduciría por la puerta de atrás el número inventado que toda esta
-    calibración existe para eliminar.
-    """
-    bounded = max(0.0, min(float(penalty), max_penalty))
-    return max(0.0, confidence - bounded)
+# `apply_llm_penalty` vivía aquí. Restaba puntos de confianza por riesgo de
+# evento, y desapareció con la confianza misma: sin porcentaje que publicar no
+# hay nada que penalizar. El filtro de noticias sigue en pie con la parte que
+# sí decide algo —`EventRisk.is_blocking`, que retira el candidato cuando hay
+# un evento binario cerca— y con su texto de contexto, que se muestra tal cual.
