@@ -3,7 +3,7 @@
     "431933636"
   ],
   "tg_offset": 419999580,
-  "last_scan_date": "2026-08-14",
+  "last_scan_date": "2026-08-17",
   "open_signals": [
     {
       "symbol": "ABBV",
@@ -16,6 +16,30 @@
       "stop": 240.5262226377128,
       "target": 268.2746459554772,
       "risk_reward": 2.683
+    },
+    {
+      "symbol": "TXN",
+      "asset_class": "stock",
+      "signal_date": "2026-08-14",
+      "alerted_at": "2026-08-17T10:40:36+00:00",
+      "score": 64.38,
+      "confidence": 0.0,
+      "entry_max": 282.94741141235596,
+      "stop": 263.6175161958813,
+      "target": 316.6216255359152,
+      "risk_reward": 1.742
+    },
+    {
+      "symbol": "F",
+      "asset_class": "stock",
+      "signal_date": "2026-08-14",
+      "alerted_at": "2026-08-17T10:40:38+00:00",
+      "score": 57.61,
+      "confidence": 0.0,
+      "entry_max": 14.506911037836279,
+      "stop": 13.704362987387906,
+      "target": 15.876021416199078,
+      "risk_reward": 1.706
     }
   ],
   "history": []
