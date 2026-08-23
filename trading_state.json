@@ -16,18 +16,6 @@
       "stop": 263.6175161958813,
       "target": 316.6216255359152,
       "risk_reward": 1.742
-    },
-    {
-      "symbol": "F",
-      "asset_class": "stock",
-      "signal_date": "2026-08-14",
-      "alerted_at": "2026-08-17T10:40:38+00:00",
-      "score": 57.61,
-      "confidence": 0.0,
-      "entry_max": 14.506911037836279,
-      "stop": 13.704362987387906,
-      "target": 15.876021416199078,
-      "risk_reward": 1.706
     }
   ],
   "history": [
@@ -52,6 +40,20 @@
       "return_pct": 0.081841,
       "is_win": true,
       "note": "Cerrada a mano por el usuario antes de tocar objetivo (268.27)."
+    },
+    {
+      "symbol": "F",
+      "asset_class": "stock",
+      "signal_date": "2026-08-14",
+      "alerted_at": "2026-08-17T10:40:38+00:00",
+      "score": 57.61,
+      "confidence": 0.0,
+      "entry_max": 14.506911037836279,
+      "stop": 13.704362987387906,
+      "target": 15.876021416199078,
+      "risk_reward": 1.706,
+      "status": "not_taken",
+      "note": "Cribada y enviada, pero el usuario decidió no tomarla."
     }
   ]
 }
