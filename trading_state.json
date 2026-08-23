@@ -6,18 +6,6 @@
   "last_scan_date": "2026-08-21",
   "open_signals": [
     {
-      "symbol": "ABBV",
-      "asset_class": "stock",
-      "signal_date": "2026-08-07",
-      "alerted_at": "2026-08-10T12:34:15+00:00",
-      "score": 56.37,
-      "confidence": 29.7,
-      "entry_max": 248.06132508686156,
-      "stop": 240.5262226377128,
-      "target": 268.2746459554772,
-      "risk_reward": 2.683
-    },
-    {
       "symbol": "TXN",
       "asset_class": "stock",
       "signal_date": "2026-08-14",
@@ -42,5 +30,28 @@
       "risk_reward": 1.706
     }
   ],
-  "history": []
+  "history": [
+    {
+      "symbol": "ABBV",
+      "asset_class": "stock",
+      "signal_date": "2026-08-07",
+      "alerted_at": "2026-08-10T12:34:15+00:00",
+      "score": 56.37,
+      "confidence": 29.7,
+      "entry_max": 248.06132508686156,
+      "stop": 240.5262226377128,
+      "target": 268.2746459554772,
+      "risk_reward": 2.683,
+      "status": "closed",
+      "outcome": "manual",
+      "entry_price": 245.65,
+      "exit_price": 266.0,
+      "entry_date": "2026-08-10",
+      "exit_date": "2026-08-21",
+      "r_multiple": 2.7007,
+      "return_pct": 0.081841,
+      "is_win": true,
+      "note": "Cerrada a mano por el usuario antes de tocar objetivo (268.27)."
+    }
+  ]
 }
