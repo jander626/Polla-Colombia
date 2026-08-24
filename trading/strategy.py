@@ -80,6 +80,11 @@ class Signal:
     adx: float = float("nan")
     rsi: float = float("nan")
     pullback_rsi: float = float("nan")
+    rsi_fast: float = float("nan")
+    # Qué regla generó la señal. Con dos reglas activas a la vez (retroceso y
+    # reversion), la ficha de Telegram necesita saber cuál disparó para no
+    # describir "tocó la EMA20" en una señal que nunca miró la EMA20.
+    entry_rule: str = "retroceso"
 
     @property
     def is_forex(self) -> bool:
@@ -455,6 +460,8 @@ def _evaluate(
             pullback_rsi=float(
                 row.get("rsi_max" if params.is_short else "rsi_min", float("nan"))
             ),
+            rsi_fast=float(row.get("rsi_fast", float("nan"))),
+            entry_rule=params.entry_rule,
         ),
         None,
     )
@@ -520,6 +527,47 @@ _STAGE_LABELS = dict(FUNNEL_STAGES)
 _POST_STAGES = ("niveles", "riesgo_beneficio", "score")
 
 
+def _funnel_labels(params: StrategyParams) -> dict[str, str]:
+    """Etiquetas del embudo que dependen del sentido o de la regla activa.
+
+    Sin esto, un escaneo en corto anunciaba "el mercado está en régimen
+    alcista" mientras filtraba justo lo contrario, y una `reversion` que no
+    mira el ADX ni el R:B mínimo aparecía en el mensaje de "hoy no hay nada"
+    como si esos dos filtros hubieran participado en la decisión.
+    """
+    short = params.is_short
+    overrides = {
+        "f_market": (
+            "el mercado está en régimen bajista" if short
+            else "el mercado está en régimen alcista"
+        ),
+        "f_regime": (
+            "el instrumento está en tendencia bajista" if short
+            else "el instrumento está en tendencia alcista"
+        ),
+    }
+    if params.entry_rule == "rsi2":
+        overrides["f_pullback"] = (
+            "está muy sobrecomprado (RSI2)" if short else "está muy sobrevendido (RSI2)"
+        )
+        # La regla `reversion` no exige ni fuerza de tendencia ni confirmación
+        # de giro: siempre pasan, así que un "0 descartados" aquí no significa
+        # que el filtro trabajara, sino que no existe para esta regla.
+        overrides["f_trend_strength"] = "fuerza de tendencia (ADX, no aplica en esta regla)"
+        overrides["f_resume"] = "confirmación de giro (no aplica en esta regla)"
+    else:
+        overrides["f_pullback"] = "hubo un rebote" if short else "hubo un retroceso"
+        overrides["f_resume"] = "está reanudando"
+
+    if params.min_risk_reward <= 0:
+        overrides["riesgo_beneficio"] = "el ratio riesgo/beneficio (sin mínimo en esta regla)"
+    else:
+        overrides["riesgo_beneficio"] = (
+            f"el ratio riesgo/beneficio llega a {params.min_risk_reward:g}"
+        )
+    return overrides
+
+
 @dataclass(frozen=True)
 class ScanFunnel:
     """Cuántos candidatos sobreviven a cada etapa del escaneo.
@@ -532,12 +580,16 @@ class ScanFunnel:
     evaluated: int = 0
     no_data: int = 0
     counts: dict[str, int] = field(default_factory=dict)
+    # Etiquetas que sustituyen a las genéricas para el sentido/regla de este
+    # escaneo. Vacío (el default) usa las de siempre.
+    labels: dict[str, str] = field(default_factory=dict)
 
     def stages(self) -> list[tuple[str, str, int, int]]:
         """(clave, etiqueta, supervivientes, descartados en esta etapa)."""
         rows: list[tuple[str, str, int, int]] = []
         alive = self.evaluated
-        for key, label in FUNNEL_STAGES:
+        for key, generic_label in FUNNEL_STAGES:
+            label = self.labels.get(key, generic_label)
             survivors = self.counts.get(key, 0)
             rows.append((key, label, survivors, alive - survivors))
             alive = survivors
@@ -624,7 +676,11 @@ def scan_with_funnel(
             found.append(signal)
 
     found.sort(key=lambda s: s.score, reverse=True)
-    return found, ScanFunnel(evaluated=evaluated, no_data=no_data, counts=counts)
+    funnel = ScanFunnel(
+        evaluated=evaluated, no_data=no_data, counts=counts,
+        labels=_funnel_labels(params),
+    )
+    return found, funnel
 
 
 def scan(

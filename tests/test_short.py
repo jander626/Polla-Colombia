@@ -462,3 +462,149 @@ def test_las_dos_reglas_tienen_calibraciones_distintas():
     from trading.config import DEFAULT_PARAMS, reversion_params
 
     assert DEFAULT_PARAMS.signature != reversion_params().signature
+
+
+# ── La ficha describe la regla que disparó de verdad ─────────────────────────
+
+def test_la_ficha_de_reversion_no_menciona_la_ema20():
+    """Antes de que Signal llevara entry_rule, esto se anunciaba con 'tocó la
+    EMA20' aunque la regla rsi2 nunca la mira: el texto asumía siempre el
+    retroceso de seis filtros."""
+    from trading import notify, universe
+    from trading.risk import Calibration, Levels
+
+    señal = Signal(
+        symbol="AAPL", name=universe.get("AAPL").name, asset_class="stock",
+        bar_date=pd.Timestamp("2026-08-21"), close=210.0, atr=4.0, atr_pct=0.019,
+        score=80.0, levels=Levels(210.5, 206.9, 214.1, 1.0, 3.6, 3.6),
+        rsi_fast=7.0, entry_rule="rsi2",
+    )
+    ficha = notify.format_signal(señal, Calibration.empty())
+
+    # "EMA200" contiene "EMA20" como subcadena; se busca la frase completa
+    # del retroceso, no la del régimen de tendencia que ambas reglas usan.
+    assert "zona de la EMA20" not in ficha
+    assert "ADX" not in ficha and "reanudando" not in ficha
+    assert "sobrevendido" in ficha and "7" in ficha
+    assert "(1 ATR)" in ficha
+
+
+def test_la_ficha_de_retroceso_sigue_describiendo_los_seis_filtros():
+    from trading import notify, universe
+    from trading.risk import Calibration, Levels
+
+    señal = Signal(
+        symbol="TXN", name=universe.get("TXN").name, asset_class="stock",
+        bar_date=pd.Timestamp("2026-08-21"), close=280.0, atr=5.0, atr_pct=0.018,
+        score=64.0, levels=Levels(282.9, 263.6, 292.9, 1.0, 19.3, 10.0),
+        adx=23.0, rsi=52.0, pullback_rsi=41.0, entry_rule="retroceso",
+    )
+    ficha = notify.format_signal(señal, Calibration.empty())
+
+    assert "EMA20" in ficha and "ADX 23" in ficha
+    assert "(2 ATR)" in ficha       # 10.0 de reward / 5.0 de atr
+
+
+def test_el_preset_reversion_es_el_default_de_la_cli():
+    """El 24 de agosto de 2026 se cambió el default en vivo. Que no vuelva a
+    cambiarse por accidente en un refactor de la CLI."""
+    import argparse
+
+    import trading_bot
+
+    args = argparse.Namespace()
+    for flag, default in (
+        ("offline", False), ("dry_run", False), ("force", False),
+        ("no_llm", False), ("compare", False), ("search", False),
+        ("direction", "long"), ("regla", "reversion"),
+    ):
+        setattr(args, flag, default)
+    base, bt = trading_bot._rule_params(args)
+    assert base.entry_rule == "rsi2"
+    assert bt.max_holding_days == 5
+
+
+# ── La regla de decisión fijada de antemano ──────────────────────────────────
+
+def test_sin_muestra_suficiente_no_hay_veredicto_solo_progreso():
+    from trading.state import TradingState
+
+    state = TradingState()
+    state.history = [
+        {"status": "closed", "is_win": True, "r_multiple": 0.2, "confidence": 0}
+        for _ in range(50)
+    ]
+    stats = state.performance()
+
+    assert stats["decision_ready"] is False
+    assert stats["decision_target"] == 200
+    assert "r_lower" not in stats
+
+
+def test_con_la_muestra_completa_decide_el_limite_inferior():
+    from trading.state import TradingState
+
+    state = TradingState()
+    # 200 operaciones con R +0.5 y algo de dispersión: el límite inferior
+    # tiene que quedar positivo pero por debajo de la media.
+    state.history = [
+        {"status": "closed", "is_win": i % 2 == 0,
+         "r_multiple": 2.0 if i % 2 == 0 else -1.0, "confidence": 0}
+        for i in range(200)
+    ]
+    stats = state.performance()
+
+    assert stats["decision_ready"] is True
+    assert stats["r_lower"] < stats["avg_r"]
+    assert stats["decision_sigue"] == (stats["r_lower"] > 0.0)
+
+
+# ── El embudo describe la regla y el sentido que corren de verdad ───────────
+
+def test_el_embudo_no_dice_alcista_al_escanear_en_corto(downtrend_with_rally):
+    """Antes de tener etiquetas por sentido, un escaneo corto imprimía 'el
+    mercado está en régimen alcista' mientras filtraba justo lo contrario."""
+    from trading import universe
+    from trading.config import replace, reversion_params
+    from trading.strategy import scan_with_funnel
+
+    p = replace(reversion_params(), direction="short")
+    _, funnel = scan_with_funnel([universe.get("AAPL")], {"AAPL": downtrend_with_rally}, p)
+    texto = funnel.summary()
+
+    assert "régimen bajista" in texto and "régimen alcista" not in texto
+    assert "tendencia bajista" in texto and "tendencia alcista" not in texto
+
+
+def test_el_embudo_no_atribuye_filtrado_a_una_etapa_inerte(uptrend_with_pullback):
+    """La regla `reversion` no exige ADX ni confirmación de giro: si el
+    embudo dice '17 tras ADX' con el mismo número que la etapa anterior, es
+    honesto; si usara la etiqueta de 'seis filtros' sin más, parecería que el
+    ADX sí participó en la decisión."""
+    from trading import universe
+    from trading.config import reversion_params
+    from trading.strategy import scan_with_funnel
+
+    _, funnel = scan_with_funnel(
+        [universe.get("AAPL")], {"AAPL": uptrend_with_pullback}, reversion_params()
+    )
+    texto = funnel.summary()
+
+    assert "no aplica en esta regla" in texto
+    assert "sin mínimo en esta regla" in texto
+
+
+def test_el_embudo_de_retroceso_no_cambia(uptrend_with_pullback):
+    """La regla vieja no puede quedar afectada por añadir etiquetas nuevas."""
+    from trading import universe
+    from trading.config import DEFAULT_PARAMS
+    from trading.strategy import scan_with_funnel
+
+    _, funnel = scan_with_funnel(
+        [universe.get("AAPL")], {"AAPL": uptrend_with_pullback}, DEFAULT_PARAMS
+    )
+    texto = funnel.summary()
+
+    assert "hubo un retroceso" in texto
+    assert "el ratio riesgo/beneficio llega a 1.5" in texto
+    assert "no aplica en esta regla" not in texto

@@ -7,8 +7,10 @@ sin saber por qué es muy fácil "arreglarlo" deshaciendo lo que costó descubri
 
 Un **cribador**, no un generador de señales. Cada mañana, antes de la apertura
 de EE.UU., revisa ~141 instrumentos operables en Quantfury y envía por Telegram
-los que cumplen seis filtros de retroceso en tendencia alcista, con la zona de
-entrada, el stop estructural y el ratio riesgo/beneficio calculados.
+los que cumplen la regla activa, con la zona de entrada, el stop estructural y
+el ratio riesgo/beneficio calculados. Desde el 24 de agosto de 2026 la regla
+activa es `reversion` (EMA200 + RSI de 2 sesiones), no la de seis filtros —
+ver [Revisión de la estrategia](#revisión-de-la-estrategia-24-de-agosto-de-2026).
 
 El usuario ejecuta a mano en Quantfury (no hay API pública de trading). Habla
 español, está en Colombia (UTC-5) y opera con dinero real.
@@ -171,6 +173,79 @@ python trading_bot.py backtest --direction both --search   # 162 mediciones
 ```
 
 O el workflow `Backtest y calibración` con el input `direction`.
+
+## Revisión de la estrategia (24 de agosto de 2026)
+
+El usuario pidió una estrategia diaria, con pocos indicadores, precisa, y que
+el backtest lo demuestre. Se midieron seis hipótesis declaradas de antemano
+—no una rejilla— con datos reales de IBKR, reservando **instrumentos Y
+fechas**, no solo fechas: el reparto de instrumentos va por hash del símbolo
+para que no lo elija quien mide. El detalle completo, con las ocho tablas de
+resultados, está en `MEDICION_ESTRATEGIA.md`.
+
+**Ninguna hipótesis demuestra ventaja.** La mejor —`reversion`, EMA200 + RSI(2)
+de dos sesiones— tiene el límite inferior del exceso negativo con la muestra
+disponible: para que toque cero harían falta ~1.959 operaciones, unos 12
+años. Es mejor candidata que la regla vieja en todo lo medido (R media, límite
+inferior, robustez a los umbrales), pero "mejor candidata" no es "demostrada".
+
+Se activó igualmente como regla por defecto en vivo (`StrategyParams.entry_rule
+= "reversion"` vía la CLI, ver `trading_bot._rule_params`) por una razón
+distinta a la ventaja: dispara ~3 veces al día en vez de ~0.6. El seguimiento
+en vivo es la única medición que no viene de un backtest; a 0.6 señales
+diarias, demostrar algo con él llevaría décadas. A 3, meses.
+
+Dos fallos de medición se corrigieron de camino, y son los que importan más
+que el resultado en sí:
+
+- **El backtest simulaba operaciones que en vivo nunca se habrían enviado.**
+  El escaneo no repite señal sobre un símbolo con posición abierta, pero
+  `run_backtest` las simulaba todas. `BacktestParams.one_position_per_symbol`
+  (default `True`) y `backtest.simulate_sequence` lo arreglan; hay un test que
+  fija que `run_backtest` y `run_search` usan la misma regla.
+- **La salida tiene que compartir tesis con la entrada.** Una entrada por
+  reversión dice "esto se pasó y va a volver": eso es un horizonte de días,
+  no de un movimiento de tendencia a 30 días. Por eso `reversion_params()` y
+  `reversion_backtest()` (en `config.py`) van SIEMPRE juntas — hay un test
+  que lo fija (`test_la_salida_va_atada_a_la_entrada`).
+
+**La ficha de Telegram describe la regla que disparó de verdad.** Antes de
+que `Signal` llevara `entry_rule`, una señal de `reversion` se anunciaba con
+"tocó la EMA20" y "MACD girando" —cosas que esa regla no mira—, porque el
+texto asumía siempre el retroceso de seis filtros. `notify._filters_passed`
+ahora rama por `signal.entry_rule`, y el objetivo del mensaje (`_target_label`)
+se calcula desde los niveles en vez de estar fijo en "3 ATR".
+
+### La regla de decisión, fijada antes de ver el resultado
+
+`config.LIVE_DECISION_SAMPLE = 200`. Con menos operaciones cerradas,
+`/rendimiento` solo muestra progreso. Con 200, el límite inferior de la R
+media (`risk.mean_lower_bound`) decide: positivo, sigue; si no, se apaga y el
+dinero va al índice. Se fijó el umbral y el criterio ANTES de tener el
+resultado a propósito — es la única forma de que dentro de unos meses la
+decisión no se reescriba alrededor del número que haya salido.
+
+**No cambies este umbral, ni el criterio, para que un resultado concreto
+quede del lado que se prefiera.** Si hay que revisarlo, que sea con una razón
+metodológica escrita aquí antes de mirar `/rendimiento`, no después.
+
+### Sobre seguir buscando
+
+Van 162 (barrido direccional) + 81 (barrido de seis filtros) + 8 (hipótesis
+declaradas) mediciones. Con suficientes intentos, algo acaba pareciendo bueno
+por azar — el momentum 12-1 lo demostró dentro del propio experimento: pasó en
+descubrimiento (+0.022%) y se cayó en el cuadrante sin nada compartido
+(−0.064%). **Antes de proponer una hipótesis nueva, hay que tener una tesis
+económica para ella, no solo curiosidad por ver qué rinde mejor.** La
+respuesta que falta no está en más búsqueda sobre el mismo histórico: está en
+los meses que vienen, y para eso existe la regla de decisión de arriba.
+
+### Dónde está la ventaja de verdad
+
+Con una ventaja de ~0.2% por operación —si resulta real—, el resultado de la
+cuenta lo decide el tamaño de posición y respetar el stop, no qué regla
+dispara. Esto no es un llamado a escribir código: es la razón por la que
+seguir afinando la señal, más allá de un punto, deja de mover la aguja.
 
 ## Cómo se trabaja
 

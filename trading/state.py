@@ -40,8 +40,8 @@ from typing import Optional
 import pandas as pd
 
 from .backtest import Trade, simulate_signal
-from .config import DEFAULT_BACKTEST, STATE_FILE, BacktestParams
-from .risk import Levels
+from .config import DEFAULT_BACKTEST, LIVE_DECISION_SAMPLE, STATE_FILE, BacktestParams
+from .risk import Levels, mean_lower_bound
 from .schedule import now_ny
 from .strategy import Signal
 from .universe import get as get_instrument
@@ -357,6 +357,7 @@ class TradingState:
             # cuando solo describe lo que el bot propuso.
             "not_taken": _not_taken(self.history),
             "avg_confidence": sum(confidences) / len(confidences) if confidences else None,
+            **_live_decision(r_values),
         }
 
 
@@ -402,6 +403,30 @@ def _move(record: dict, entry: float, exit_price: float) -> float:
 
 def _not_taken(history: list[dict]) -> int:
     return sum(1 for h in history if h.get("status") == "not_taken")
+
+
+def _live_decision(r_values: list[float]) -> dict:
+    """Progreso hacia la regla de decisión fijada en `config.LIVE_DECISION_SAMPLE`.
+
+    El veredicto ("sigue"/"se apaga") solo aparece con la muestra completa:
+    calcularlo antes sería el mismo error que "mayor que cero" ya costó dos
+    veces en este proyecto —una vez en las alertas, otra en la partición
+    temporal—. Con menos muestra se publica el progreso y nada más.
+    """
+    objetivo = LIVE_DECISION_SAMPLE
+    n = len(r_values)
+    if n < objetivo:
+        return {"decision_target": objetivo, "decision_ready": False}
+
+    total = sum(r_values)
+    total_sq = sum(r * r for r in r_values)
+    r_lower = mean_lower_bound(total, total_sq, n)
+    return {
+        "decision_target": objetivo,
+        "decision_ready": True,
+        "r_lower": r_lower,
+        "decision_sigue": r_lower > 0.0,
+    }
 
 
 def _today() -> date:

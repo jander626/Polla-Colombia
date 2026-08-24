@@ -511,6 +511,20 @@ MAX_LLM_PENALTY = 25.0
 # "suficiente para operar". Por debajo de este umbral la alerta lo dice.
 MIN_MEANINGFUL_EXPECTANCY = 0.05
 
+# Regla de decisión del seguimiento en vivo, fijada el 24 de agosto de 2026
+# ANTES de mirar el resultado — para que dentro de unos meses no se reescriba
+# alrededor del número que haya salido. Con esta cantidad de operaciones
+# cerradas, `/rendimiento` da un veredicto: si el límite inferior de la R
+# media (Wilson/normal, `risk.mean_lower_bound`) es positivo, el cribador
+# sigue; si no lo es, se apaga y el dinero va al índice. Antes de esa cifra
+# no hay veredicto, solo progreso — decidir con menos muestra es el mismo
+# error que "mayor que cero" ya costó dos veces en este proyecto.
+#
+# 200 sale de MEDICION_ESTRATEGIA.md: con la regla `reversion` en vivo
+# (~3 señales/día en 141 instrumentos) son unos meses, no los ~12 años que
+# pedía la regla de seis filtros.
+LIVE_DECISION_SAMPLE = 200
+
 
 @dataclass(frozen=True)
 class BacktestParams:

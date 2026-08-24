@@ -28,6 +28,12 @@ on:
         default: "long"
         type: choice
         options: ["long", "short", "both"]
+      regla:
+        description: "Regla de entrada: retroceso (6 filtros) o reversion (EMA200+RSI2, la que corre en vivo)"
+        required: false
+        default: "reversion"
+        type: choice
+        options: ["reversion", "retroceso"]
 
 permissions:
   contents: write  # para commitear calibration.json
@@ -72,9 +78,10 @@ jobs:
           COMPARE: ${{ github.event.inputs.compare || 'false' }}
           SEARCH: ${{ github.event.inputs.search || 'false' }}
           DIRECTION: ${{ github.event.inputs.direction || 'long' }}
+          REGLA: ${{ github.event.inputs.regla || 'reversion' }}
         run: |
           set -o pipefail
-          args=(backtest --years "$YEARS" --direction "$DIRECTION")
+          args=(backtest --years "$YEARS" --direction "$DIRECTION" --regla "$REGLA")
           # El barrido y la comparación solo miden: escribir la calibración
           # desde cualquiera de los dos guardaría números de una estrategia que
           # no es la que corre en vivo.

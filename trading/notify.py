@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
+import numpy as np
 import requests
 
 from .config import TELEGRAM_TOKEN
@@ -210,13 +211,38 @@ def _filters_passed(signal: Signal) -> list[str]:
     Sin esto, la tarjeta solo dice "aquí tienes un símbolo": el usuario no
     puede juzgar el candidato ni descartarlo con criterio propio, que es
     justo lo que un cribador tiene que permitirle hacer.
+
+    Con dos reglas activas (`retroceso` y `reversion`), esto tiene que
+    describir la que disparó de verdad. Antes de que `Signal` llevara
+    `entry_rule`, una señal de `reversion` se anunciaba con "tocó la EMA20"
+    y "MACD girando" —cosas que esa regla no mira— porque el texto asumía
+    siempre el retroceso de seis filtros.
     """
     short = signal.levels.is_short
+    if signal.entry_rule == "rsi2":
+        return _filters_passed_reversion(signal, short)
+    return _filters_passed_retroceso(signal, short)
+
+
+def _filters_passed_reversion(signal: Signal, short: bool) -> list[str]:
+    lines = [
+        "✓ En tendencia bajista (cierre bajo la EMA200)"
+        if short else
+        "✓ En tendencia alcista (cierre sobre la EMA200)"
+    ]
+    if signal.rsi_fast == signal.rsi_fast:            # descarta NaN
+        extremo = "sobrecomprado" if short else "sobrevendido"
+        lines.append(f"✓ Muy {extremo} (RSI de 2 sesiones en {signal.rsi_fast:.0f})")
+    lines.append(f"✓ Volatilidad en rango (ATR {100 * signal.atr_pct:.1f}% del precio)")
+    return lines
+
+
+def _filters_passed_retroceso(signal: Signal, short: bool) -> list[str]:
     if short:
         lines = ["✓ En tendencia bajista (cierre bajo la EMA200, EMA50 bajo EMA200)"]
     else:
         lines = ["✓ En tendencia alcista (cierre sobre la EMA200, EMA50 sobre EMA200)"]
-    if signal.adx == signal.adx:                      # descarta NaN
+    if signal.adx == signal.adx:
         lines.append(f"✓ Con fuerza de tendencia (ADX {signal.adx:.0f})")
     if signal.pullback_rsi == signal.pullback_rsi:
         verbo = "Rebotó" if short else "Retrocedió"
@@ -230,6 +256,19 @@ def _filters_passed(signal: Signal) -> list[str]:
         lines.append(f"✓ Está reanudando (RSI {signal.rsi:.0f} {rumbo})")
     lines.append(f"✓ Volatilidad en rango (ATR {100 * signal.atr_pct:.1f}% del precio)")
     return lines
+
+
+def _target_label(signal: Signal) -> str:
+    """El objetivo ya no es siempre 3 ATR: la regla `reversion` usa 1.
+
+    Se calcula desde los niveles en vez de leer el parámetro para no tener
+    que pasar `StrategyParams` hasta aquí solo por esta etiqueta.
+    """
+    atr = signal.atr
+    if not np.isfinite(atr) or atr <= 0:
+        return ""
+    mult = signal.levels.reward_per_unit / atr
+    return f" ({mult:.0f} ATR)"
 
 
 def format_signal(
@@ -267,7 +306,7 @@ def format_signal(
         "",
         f"📥 Zona de entrada: {entrada} *{_fmt(levels.entry_max, instrument)}*",
         f"🛑 Stop estructural: *{_fmt(levels.stop, instrument)}*",
-        f"🎯 Objetivo (3 ATR): *{_fmt(levels.target, instrument)}*",
+        f"🎯 Objetivo{_target_label(signal)}: *{_fmt(levels.target, instrument)}*",
         f"⚖️ Riesgo/beneficio: *1:{levels.risk_reward:.2f}*",
     ]
 
@@ -619,23 +658,58 @@ def format_performance(stats: dict) -> str:
         "",
         "_Estos son resultados en vivo sobre los candidatos que se enviaron._",
         "_Es la única medición que no viene de un backtest, y por eso la única"
-        " que puede llegar a demostrar algo sobre estos filtros. Hacen falta"
-        " cientos de operaciones antes de que signifique nada._",
+        " que puede llegar a demostrar algo sobre estos filtros._",
+        "",
+        _decision_line(stats),
     ]
     return "\n".join(lines)
+
+
+def _decision_line(stats: dict) -> str:
+    """Progreso hacia la regla de decisión fijada de antemano (24/08/2026).
+
+    Fijar el umbral y el criterio ANTES de ver el resultado es lo que impide
+    que dentro de unos meses se reinterprete el número que haya salido. Con
+    menos operaciones que el objetivo no hay veredicto, solo cuenta cuántas
+    faltan; con el objetivo cumplido, el límite inferior de la R media decide.
+    """
+    objetivo = stats.get("decision_target")
+    if objetivo is None:
+        return ""
+
+    if not stats.get("decision_ready"):
+        return (
+            f"_Regla de decisión: con {objetivo} operaciones cerradas se "
+            f"decide si esto sigue o se apaga, según el límite inferior de la "
+            f"R media. Van {stats['closed']}/{objetivo}._"
+        )
+
+    r_lower = stats["r_lower"]
+    if stats["decision_sigue"]:
+        return (
+            f"_✅ Con {stats['closed']} operaciones, el límite inferior de la "
+            f"R media es positivo ({r_lower:+.3f}R): la regla de decisión dice "
+            f"que sigue._"
+        )
+    return (
+        f"_🛑 Con {stats['closed']} operaciones, el límite inferior de la R "
+        f"media NO es positivo ({r_lower:+.3f}R): la regla de decisión fijada "
+        f"de antemano dice que se apague y el dinero vaya al índice._"
+    )
 
 
 def format_help() -> str:
     return (
         "🤖 *Cribador de Quantfury*\n\n"
         "Revisa cada día, antes de la apertura de EE.UU., las acciones y pares "
-        "de forex operables en Quantfury, y te enseña los que cumplen seis "
-        "filtros de retroceso en tendencia alcista — con su zona de entrada, "
-        "su stop estructural y su ratio riesgo/beneficio ya calculados.\n\n"
-        "*No emite señales con ventaja demostrada.* Cuatro mediciones "
-        "independientes sobre cinco años coinciden en que estos filtros no "
-        "baten al índice de forma distinguible del azar. Lo que hace es "
-        "ahorrarte mirar 141 gráficos cada mañana; la decisión es tuya.\n\n"
+        "de forex operables en Quantfury, y te enseña los que están en "
+        "tendencia y muy estirados en sentido contrario (EMA200 + RSI de 2 "
+        "sesiones) — con su zona de entrada, su stop estructural y su ratio "
+        "riesgo/beneficio ya calculados.\n\n"
+        "*No emite señales con ventaja demostrada.* Con cinco años de datos, "
+        "el límite inferior de la ventaja medida todavía no supera cero. Lo "
+        "que hace es ahorrarte mirar 141 gráficos cada mañana; la decisión "
+        "es tuya. Detalle en MEDICION_ESTRATEGIA.md del repositorio.\n\n"
         "Comandos:\n"
         "• /senales — Últimos candidatos resueltos\n"
         "• /abiertas — Operaciones en curso\n"

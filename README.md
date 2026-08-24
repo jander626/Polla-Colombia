@@ -1,9 +1,10 @@
 # Cribador de Quantfury — acciones y forex
 
 Revisa el mercado una vez al día, antes de la apertura de Estados Unidos, y
-manda por Telegram los instrumentos operables en Quantfury que cumplen seis
-filtros de retroceso en tendencia alcista, con la zona de entrada, el stop
-estructural y el ratio riesgo/beneficio ya calculados.
+manda por Telegram los instrumentos operables en Quantfury que están en
+tendencia y muy estirados en sentido contrario (EMA200 + RSI de 2 sesiones),
+con la zona de entrada, el stop estructural y el ratio riesgo/beneficio ya
+calculados.
 
 > **No emite señales con ventaja demostrada, y no publica ningún porcentaje de
 > confianza.** Nació haciendo ambas cosas; dejó de hacerlas cuando cuatro
@@ -11,6 +12,11 @@ estructural y el ratio riesgo/beneficio ya calculados.
 > [Por qué es un cribador](#por-qué-es-un-cribador-y-no-un-generador-de-señales)).
 > Lo que aporta es reducir 141 gráficos a unos pocos candidatos con sus
 > niveles hechos. La decisión es tuya.
+
+> **La ganancia grande, si existe, no está en la señal.** Con una ventaja de
+> ~0.2% por operación —si es real—, lo que decide si la cuenta sobrevive es el
+> tamaño de posición y respetar el stop, no qué indicador dispara. Un solo
+> stop saltado a mano borra meses de ventaja teórica.
 
 > **Esto no es asesoría financiera.**
 
@@ -20,8 +26,8 @@ estructural y el ratio riesgo/beneficio ya calculados.
 
 Entre las **06:00 y las 09:25 hora de Nueva York** el bot descarga velas
 diarias de ~141 instrumentos (acciones líquidas de NYSE/NASDAQ, cuatro ETFs y
-los 14 pares de divisas de Quantfury), calcula indicadores y aplica seis
-filtros. De los que sobreviven se queda con los mejores, los pasa por un
+los 14 pares de divisas de Quantfury), calcula indicadores y aplica la regla
+activa. De los que sobreviven se queda con los mejores, los pasa por un
 filtro de noticias y manda la ficha.
 
 **Hay días que no llega nada, y es correcto.** Un cribador que encuentra algo
@@ -31,26 +37,42 @@ no sea indistinguible de una avería.
 
 ### La estrategia
 
-Retroceso en tendencia alcista: no comprar rupturas ni adivinar suelos, sino
-esperar a que algo que ya sube se tome un descanso y entrar cuando reanuda.
+Desde el **24 de agosto de 2026** el cribador en vivo usa `--regla reversion`
+por defecto: dos indicadores, no seis filtros. Se cambió tras medir seis
+hipótesis declaradas de antemano con instrumentos Y fechas reservados —no
+solo fechas— y salir mejor en todo lo comparable (detalle completo en
+[`MEDICION_ESTRATEGIA.md`](MEDICION_ESTRATEGIA.md)):
 
-| Filtro | Condición |
+| Regla | Condición |
 |---|---|
-| Régimen alcista | `Close > EMA200` y `EMA50 > EMA200` |
-| Fuerza de tendencia | `ADX(14) > 15` |
-| Retroceso real | El RSI cayó de 45 y el precio visitó la zona de la EMA20 |
-| Reanudación | RSI cruzando al alza, MACD girando o cierre sobre el máximo previo |
+| Régimen de fondo | `Close > EMA200` (en corto, `Close < EMA200`) |
+| Reversión extrema | `RSI(2) < 10` (en corto, `RSI(2) > 90`) |
 | Liquidez | Volumen medio en dólares por encima del umbral |
 | Volatilidad sana | `ATR/precio` ni muerto ni caótico |
 
-Los niveles salen del ATR: la **entrada es un techo** (si abre con hueco
-alcista, la operación no se ejecuta), el **stop** se apoya en el mínimo del
-retroceso y el **objetivo** está a 3 ATR. Cualquier candidato por debajo de
-1.5 de ratio riesgo/beneficio se descarta.
+La salida va atada a la entrada y no es la misma que antes: **objetivo a 1
+ATR**, plazo máximo de **5 días**, sin suelo de ratio riesgo/beneficio.
+Separar la salida de la entrada —objetivo a 3 ATR, 30 días, como pedía la
+regla vieja— cuesta 19 puntos de acierto medidos: una entrada por reversión
+dice "el precio se pasó y volverá", y eso tiene horizonte de días, no de un
+movimiento de tendencia de un mes.
 
-Esta parte sigue siendo útil aunque los filtros no tengan ventaja demostrada:
-el stop estructural y el ratio están bien calculados, y son la mitad de la
-información que hace falta para decidir.
+La regla anterior —seis filtros: régimen, fuerza de tendencia (ADX), retroceso
+a la EMA20, reanudación, liquidez y volatilidad, con objetivo a 3 ATR y R:B
+mínimo de 1.5— sigue disponible con `--regla retroceso`, para comparar o
+volver atrás. Ninguna de las dos regla tiene ventaja demostrada todavía: con
+`reversion`, el límite inferior del exceso sobre el índice es negativo. Lo que
+cambió es que da ~3 señales al día en vez de ~0.6, así que demostrarla con el
+seguimiento en vivo es cuestión de meses y no de décadas.
+
+En los dos casos, los niveles salen del ATR: la **entrada es un límite**
+condicional (un techo en largo, un suelo en corto; si el precio abre con un
+hueco fuerte a favor, la operación no se ejecuta) y el **stop** se apoya en la
+estructura del precio.
+
+Esta parte sigue siendo útil aunque la regla activa no tenga ventaja
+demostrada: el stop estructural y el ratio están bien calculados, y son la
+mitad de la información que hace falta para decidir.
 
 ## Por qué es un cribador y no un generador de señales
 

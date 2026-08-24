@@ -249,20 +249,34 @@ def test_performance_reports_live_results_without_promising_anything():
     """Es la única medición que no viene de un backtest, y hay que decirlo.
 
     Antes comparaba el acierto real contra la confianza prometida. Ya no hay
-    confianza prometida: lo que queda es el resultado en vivo, con el aviso de
-    que hacen falta cientos de operaciones antes de que signifique algo.
+    confianza prometida: lo que queda es el resultado en vivo, con el progreso
+    hacia la regla de decisión fijada de antemano (config.LIVE_DECISION_SAMPLE).
     """
     message = format_performance(
         {
             "closed": 20, "wins": 11, "win_rate": 0.55, "avg_r": 0.42,
             "total_r": 8.4, "open": 3,
+            "decision_target": 200, "decision_ready": False,
         }
     )
     assert "55.0%" in message
     assert "+0.42" in message
     assert "no viene de un backtest" in message
-    assert "cientos de operaciones" in message
-    assert "prometida" not in message
+    assert "20/200" in message
+
+
+def test_performance_gives_a_verdict_once_the_sample_is_complete():
+    """Con la muestra completa, el límite inferior de la R media decide."""
+    base = {
+        "closed": 200, "wins": 90, "win_rate": 0.45, "avg_r": 0.10,
+        "total_r": 20.0, "open": 0, "decision_target": 200, "decision_ready": True,
+    }
+
+    sigue = format_performance({**base, "r_lower": 0.02, "decision_sigue": True})
+    assert "sigue" in sigue and "+0.020R" in sigue
+
+    apaga = format_performance({**base, "r_lower": -0.05, "decision_sigue": False})
+    assert "se apague" in apaga and "-0.050R" in apaga
 
 
 def test_help_warns_it_is_not_financial_advice():

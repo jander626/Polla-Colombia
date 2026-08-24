@@ -21,9 +21,20 @@ exceso sobre comprar y mantener el índice es indistinguible de cero, y la
 puntuación técnica no ordena. Publicar un porcentaje de confianza sobre eso
 habría sido la única parte del bot capaz de costar dinero de verdad.
 
-Lo que sí aporta: reduce 141 gráficos a los pocos que cumplen seis filtros, y
-deja calculados la zona de entrada, el stop estructural y el ratio
+Lo que sí aporta: reduce 141 gráficos a los pocos que cumplen la regla activa,
+y deja calculados la zona de entrada, el stop estructural y el ratio
 riesgo/beneficio. La decisión es del usuario.
+
+**Regla de entrada, desde el 24 de agosto de 2026: `reversion`** (EMA200 +
+RSI de 2 sesiones), no la de seis filtros. Se midió contra cinco alternativas
+declaradas de antemano, con instrumentos Y fechas reservados —no solo
+fechas—, y salió mejor en todo lo comparable: R media, límite inferior del
+exceso, y sobre todo frecuencia (~3 señales/día en 141 instrumentos, contra
+~0.6 de la regla vieja). Sigue SIN demostrar ventaja —el límite inferior del
+exceso es negativo—, pero es la única con la que demostrarla es alcanzable en
+un plazo razonable: al ritmo antiguo hacían falta décadas de seguimiento en
+vivo para juntar la muestra. Detalle completo en `MEDICION_ESTRATEGIA.md`.
+La regla vieja sigue disponible con `--regla retroceso`, para comparar.
 """
 
 from __future__ import annotations
@@ -666,8 +677,14 @@ def main() -> int:
         p.add_argument(
             "--regla",
             choices=("retroceso", "reversion"),
-            default="retroceso",
-            help="Regla de entrada (por defecto: la de seis filtros)",
+            # Desde el 24 de agosto de 2026 el cribador en vivo usa la regla
+            # de dos indicadores por defecto: es igual o mejor que la de seis
+            # filtros en todo lo medido (MEDICION_ESTRATEGIA.md) y, sobre
+            # todo, da ~3 señales al día en vez de ~0.6 — al ritmo antiguo
+            # habrían hecho falta décadas para acumular la muestra que exige
+            # demostrar algo con el seguimiento en vivo.
+            default="reversion",
+            help="Regla de entrada (por defecto: EMA200 + RSI de 2 sesiones)",
         )
         return p
 
@@ -720,7 +737,7 @@ def main() -> int:
     for flag, default in (
         ("offline", False), ("dry_run", False), ("force", False),
         ("no_llm", False), ("compare", False), ("search", False),
-        ("direction", "long"), ("regla", "retroceso"),
+        ("direction", "long"), ("regla", "reversion"),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)
