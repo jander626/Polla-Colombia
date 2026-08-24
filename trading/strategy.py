@@ -1,12 +1,18 @@
-"""Estrategia: retroceso en tendencia alcista (solo compras).
+"""Estrategia: retroceso en tendencia, en los dos sentidos.
 
-La idea, en una frase: no comprar rupturas ni intentar adivinar suelos, sino
-esperar a que un instrumento que ya está subiendo se tome un descanso y entrar
-cuando reanuda.
+La idea, en una frase: no perseguir rupturas ni intentar adivinar extremos,
+sino esperar a que un instrumento que ya se mueve en una dirección se tome un
+descanso y entrar cuando reanuda.
+
+En largo eso es una tendencia alcista, un retroceso y una reanudación al alza.
+En corto (`StrategyParams.direction == "short"`) es exactamente lo mismo
+reflejado: tendencia bajista, rebote, y vuelta a caer. No son dos estrategias
+sino una con el signo cambiado, y así está escrito a propósito — dos cuerpos de
+reglas independientes se habrían desincronizado a la primera.
 
 Se eligió esta y no otra por tres motivos concretos:
 
-1. Es long-only por naturaleza, que es lo que pidió el usuario.
+1. El retroceso da un punto de entrada con estructura a ambos lados.
 2. Funciona sobre velas diarias, lo que encaja con un solo escaneo al día y
    mantiene el consumo de la API dentro del plan gratuito.
 3. El retroceso deja un punto de stop natural justo debajo, así que el ratio
@@ -74,6 +80,11 @@ class Signal:
     adx: float = float("nan")
     rsi: float = float("nan")
     pullback_rsi: float = float("nan")
+    rsi_fast: float = float("nan")
+    # Qué regla generó la señal. Con dos reglas activas a la vez (retroceso y
+    # reversion), la ficha de Telegram necesita saber cuál disparó para no
+    # describir "tocó la EMA20" en una señal que nunca miró la EMA20.
+    entry_rule: str = "retroceso"
 
     @property
     def is_forex(self) -> bool:
@@ -104,6 +115,8 @@ def compute_features(
     out["ema_mid"] = ind.ema(close, params.ema_mid)
     out["ema_slow"] = ind.ema(close, params.ema_slow)
     out["rsi"] = ind.rsi(close, params.rsi_period)
+    # RSI de dos sesiones: el único indicador extra que pide la regla "rsi2".
+    out["rsi_fast"] = ind.rsi(close, params.rsi_fast_period)
     out["atr"] = ind.atr(high, low, close, params.atr_period)
     out["atr_pct"] = out["atr"] / close.replace(0.0, np.nan)
 
@@ -135,9 +148,13 @@ def compute_features(
         # larga. Es la forma más barata de evitar los tramos donde la reversión
         # deja de funcionar, que son los que producen la máxima caída.
         benchmark = benchmark_close.reindex(out.index)
-        out["market_ok"] = ind.above_moving_average(
-            benchmark, params.market_regime_ma
-        ).fillna(False)
+        above = ind.above_moving_average(benchmark, params.market_regime_ma)
+        # En corto el régimen favorable es el contrario: solo se vende con el
+        # índice POR DEBAJO de su media larga. Esto reduce muchísimo el número
+        # de días operables —el S&P pasa la mayor parte del tiempo por
+        # encima—, y esa escasez es un resultado de la medición, no un fallo:
+        # las operaciones cortas salen agrupadas en unos pocos episodios.
+        out["market_ok"] = (~above if params.is_short else above).fillna(False)
     else:
         out["rel_strength"] = np.nan
         # Sin benchmark (forex) no hay régimen que filtrar: el S&P no es su
@@ -146,6 +163,10 @@ def compute_features(
 
     out["swing_low"] = ind.rolling_low(low, params.stop_swing_lookback)
     out["resistance"] = ind.rolling_high(high, params.resistance_lookback)
+    # Los espejos de las dos anteriores: en corto el stop se apoya en el máximo
+    # del rebote y el "espacio libre" se mide hacia el soporte, no hacia arriba.
+    out["swing_high"] = ind.rolling_high(high, params.stop_swing_lookback)
+    out["support"] = ind.rolling_low(low, params.resistance_lookback)
 
     _add_filters(out, params, has_volume)
     _add_score(out, params, has_volume, benchmark_close is not None)
@@ -153,35 +174,60 @@ def compute_features(
 
 
 def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) -> None:
-    close, low = out["close"], out["low"]
+    close, low, high = out["close"], out["low"], out["high"]
     window = params.pullback_lookback
+    short = params.is_short
 
-    # 1 — Régimen alcista de fondo.
-    out["f_regime"] = (close > out["ema_slow"]) & (out["ema_mid"] > out["ema_slow"])
+    # Los umbrales del RSI se reflejan sobre 50: si en largo el retroceso exige
+    # caer por debajo de 45, en corto el rebote exige subir por encima de 55.
+    # Reflejarlos —en vez de darles parámetros propios— evita duplicar la
+    # rejilla del barrido y con ella la superficie de sobreajuste.
+    pullback_rsi = 100.0 - params.pullback_rsi_max if short else params.pullback_rsi_max
+    resume_rsi = 100.0 - params.resume_rsi_min if short else params.resume_rsi_min
+
+    # 1 — Régimen de fondo, en el sentido que toque.
+    if short:
+        out["f_regime"] = (close < out["ema_slow"]) & (out["ema_mid"] < out["ema_slow"])
+    else:
+        out["f_regime"] = (close > out["ema_slow"]) & (out["ema_mid"] > out["ema_slow"])
 
     # 2 — La tendencia tiene fuerza. Sin esto la estrategia se desangra en
-    #     mercados laterales, donde los retrocesos no reanudan nada.
+    #     mercados laterales, donde los retrocesos no reanudan nada. El ADX no
+    #     tiene signo: mide fuerza, no dirección, así que vale igual en corto.
     out["f_trend_strength"] = out["adx"] > params.adx_min
 
-    # 3 — Hubo un retroceso real: el RSI se enfrió y el precio visitó la zona
+    # 3 — Hubo un retroceso real: el RSI se descargó y el precio visitó la zona
     #     de la media rápida, sin llegar a romper la tendencia de fondo.
     out["rsi_min"] = out["rsi"].rolling(window, min_periods=1).min()
-    rsi_dipped = out["rsi_min"] < params.pullback_rsi_max
-    touched = (low <= out["ema_fast"] + params.pullback_ema_touch_atr * out["atr"])
+    out["rsi_max"] = out["rsi"].rolling(window, min_periods=1).max()
+    if short:
+        rsi_dipped = out["rsi_max"] > pullback_rsi
+        touched = high >= out["ema_fast"] - params.pullback_ema_touch_atr * out["atr"]
+        structure_intact = high.rolling(window, min_periods=1).max() < out["ema_slow"]
+    else:
+        rsi_dipped = out["rsi_min"] < pullback_rsi
+        touched = low <= out["ema_fast"] + params.pullback_ema_touch_atr * out["atr"]
+        structure_intact = low.rolling(window, min_periods=1).min() > out["ema_slow"]
     touched_recently = touched.rolling(window, min_periods=1).max().astype(bool)
-    structure_intact = low.rolling(window, min_periods=1).min() > out["ema_slow"]
     out["f_pullback"] = rsi_dipped & touched_recently & structure_intact
 
     # 4 — Está reanudando. Este es el filtro que evita comprar un cuchillo
-    #     cayendo: exige una señal activa de giro, no solo un precio barato.
-    rsi_crossed = (out["rsi"] > params.resume_rsi_min) & (
-        out["rsi"].shift(1) <= params.resume_rsi_min
-    )
-    macd_turned = (out["macd_hist"] > 0) & (out["macd_hist"].shift(1) <= 0)
-    broke_prev_high = close > out["high"].shift(1)
-    out["f_resume"] = (out["rsi"] > params.resume_rsi_min) & (
-        rsi_crossed | macd_turned | broke_prev_high
-    )
+    #     cayendo —o venderle a un cohete—: exige una señal activa de giro, no
+    #     solo un precio que parezca bueno.
+    if short:
+        rsi_crossed = (out["rsi"] < resume_rsi) & (out["rsi"].shift(1) >= resume_rsi)
+        macd_turned = (out["macd_hist"] < 0) & (out["macd_hist"].shift(1) >= 0)
+        broke_prev = close < out["low"].shift(1)
+        out["f_resume"] = (out["rsi"] < resume_rsi) & (
+            rsi_crossed | macd_turned | broke_prev
+        )
+    else:
+        rsi_crossed = (out["rsi"] > resume_rsi) & (out["rsi"].shift(1) <= resume_rsi)
+        macd_turned = (out["macd_hist"] > 0) & (out["macd_hist"].shift(1) <= 0)
+        broke_prev = close > out["high"].shift(1)
+        out["f_resume"] = (out["rsi"] > resume_rsi) & (
+            rsi_crossed | macd_turned | broke_prev
+        )
 
     # 5 — Liquidez. El forex no publica volumen centralizado, pero los 14 pares
     #     de Quantfury son de por sí los más líquidos del mundo.
@@ -195,6 +241,9 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
     out["f_volatility"] = (out["atr_pct"] >= params.min_atr_pct) & (
         out["atr_pct"] <= params.max_atr_pct
     )
+
+    if params.entry_rule == "rsi2":
+        _reglas_rsi2(out, params, short)
 
     if params.use_market_regime_filter:
         out["f_market"] = out["market_ok"].astype(bool)
@@ -212,33 +261,84 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
     )
 
 
+def _reglas_rsi2(out: pd.DataFrame, params: StrategyParams, short: bool) -> None:
+    """La regla de dos indicadores: tendencia de fondo + sobreventa extrema.
+
+    Reemplaza el retroceso, la reanudación y la fuerza de tendencia por una
+    sola condición. Los filtros de liquidez y volatilidad se conservan: no
+    predicen nada, son restricciones de lo que se puede operar de verdad.
+
+    Sustituye tres filtros por uno a propósito. Cada filtro extra es un
+    parámetro más que ajustar, y la medición no encontró que los tres juntos
+    ordenaran mejor que este solo.
+    """
+    close, rapido = out["close"], out["rsi_fast"]
+
+    if short:
+        out["f_regime"] = close < out["ema_slow"]
+        out["f_pullback"] = rapido > (100.0 - params.rsi2_entry_max)
+    else:
+        out["f_regime"] = close > out["ema_slow"]
+        out["f_pullback"] = rapido < params.rsi2_entry_max
+
+    # Las otras dos etapas del embudo dejan de filtrar, pero se conservan como
+    # columnas para que el embudo y los tests sigan hablando el mismo idioma.
+    out["f_trend_strength"] = True
+    out["f_resume"] = True
+
+
 def _add_score(
     out: pd.DataFrame, params: StrategyParams, has_volume: bool, has_benchmark: bool
 ) -> None:
-    """Puntuación 0-100 combinando cinco componentes normalizados a [0, 1]."""
+    """Puntuación 0-100 combinando cinco componentes normalizados a [0, 1].
+
+    Cada componente se refleja para el lado corto con la misma fórmula y el
+    signo cambiado. Se mantiene la forma exacta —y no una puntuación nueva
+    "pensada para cortos"— por una razón de método: el diagnóstico ya mostró
+    que esta puntuación no ordena resultados en largo, así que inventarle
+    componentes propios al lado corto sería añadir grados de libertad a algo
+    que todavía no ha demostrado predecir nada. Si el reflejo tampoco ordena,
+    esa es la respuesta.
+    """
     window = params.pullback_lookback
+    short = params.is_short
 
     # Fuerza de tendencia: ADX por encima del umbral y separación de medias.
     adx_part = _clip01((out["adx"] - params.adx_min) / (40.0 - params.adx_min))
-    spread = (out["ema_mid"] - out["ema_slow"]) / out["close"].replace(0.0, np.nan)
+    gap = out["ema_slow"] - out["ema_mid"] if short else out["ema_mid"] - out["ema_slow"]
+    spread = gap / out["close"].replace(0.0, np.nan)
     spread_part = _clip01(spread / 0.10)
     out["c_trend"] = 0.6 * adx_part + 0.4 * spread_part
 
     # Calidad del retroceso: profundo pero no roto. Un RSI que cae a 40 es un
     # descanso; uno que cae a 20 suele ser un cambio de tendencia.
-    rsi_min = out["rsi"].rolling(window, min_periods=1).min()
-    depth_part = _clip01(1.0 - (rsi_min - 40.0).abs() / 25.0)
-    touch_dist = (
-        (out["low"] - out["ema_fast"]) / out["atr"].replace(0.0, np.nan)
-    ).rolling(window, min_periods=1).min().abs()
+    # El punto dulce del retroceso se refleja sobre 50: RSI ~40 en largo,
+    # RSI ~60 en corto.
+    if short:
+        rsi_extreme = out["rsi"].rolling(window, min_periods=1).max()
+        depth_part = _clip01(1.0 - (rsi_extreme - 60.0).abs() / 25.0)
+        touch_dist = (
+            (out["high"] - out["ema_fast"]) / out["atr"].replace(0.0, np.nan)
+        ).rolling(window, min_periods=1).max().abs()
+    else:
+        rsi_extreme = out["rsi"].rolling(window, min_periods=1).min()
+        depth_part = _clip01(1.0 - (rsi_extreme - 40.0).abs() / 25.0)
+        touch_dist = (
+            (out["low"] - out["ema_fast"]) / out["atr"].replace(0.0, np.nan)
+        ).rolling(window, min_periods=1).min().abs()
     touch_part = _clip01(1.0 - touch_dist / 1.5)
     out["c_pullback"] = 0.6 * depth_part + 0.4 * touch_part
 
     # Confirmación de momentum en la vela de reanudación.
-    hist_rising = (out["macd_hist"] > out["macd_hist"].shift(1)).astype(float)
-    rsi_slope = _clip01((out["rsi"] - out["rsi"].shift(2)) / 15.0)
     bar_range = (out["high"] - out["low"]).replace(0.0, np.nan)
-    close_strength = _clip01((out["close"] - out["low"]) / bar_range)
+    if short:
+        hist_rising = (out["macd_hist"] < out["macd_hist"].shift(1)).astype(float)
+        rsi_slope = _clip01((out["rsi"].shift(2) - out["rsi"]) / 15.0)
+        close_strength = _clip01((out["high"] - out["close"]) / bar_range)
+    else:
+        hist_rising = (out["macd_hist"] > out["macd_hist"].shift(1)).astype(float)
+        rsi_slope = _clip01((out["rsi"] - out["rsi"].shift(2)) / 15.0)
+        close_strength = _clip01((out["close"] - out["low"]) / bar_range)
     out["c_momentum"] = (hist_rising + rsi_slope + close_strength) / 3.0
 
     # Espacio libre hasta el máximo reciente, en múltiplos de ATR. Sustituye al
@@ -246,22 +346,37 @@ def _add_score(
     # (lo que eliminaba casi todos los retrocesos, porque siempre vienen de un
     # máximo cercano), penaliza su puntuación y deja que el backtest mida
     # cuánto cuesta realmente tener un techo encima.
-    headroom_atr = (out["resistance"] - out["close"]) / out["atr"].replace(0.0, np.nan)
+    # En corto el espacio libre se mide hacia abajo, hasta el soporte.
+    room = out["close"] - out["support"] if short else out["resistance"] - out["close"]
+    headroom_atr = room / out["atr"].replace(0.0, np.nan)
     out["c_headroom"] = _clip01(headroom_atr / params.headroom_target_atr)
 
     # Momentum 12-1 (Jegadeesh y Titman). Se normaliza sobre un rango de
     # -20% a +60%, que cubre lo que hace una acción líquida en un año.
-    out["c_momentum_12_1"] = _clip01((out["momentum_12_1"] + 0.20) / 0.80)
+    # En corto se premia el momentum 12-1 NEGATIVO: el mismo efecto con el
+    # signo cambiado, sobre el mismo rango.
+    out["c_momentum_12_1"] = _clip01(
+        (0.60 - out["momentum_12_1"]) / 0.80
+        if short
+        else (out["momentum_12_1"] + 0.20) / 0.80
+    )
 
     # Reversión a corto plazo: ya viene invertida, así que un valor alto
     # significa "se quedó atrás el último mes", que es lo que se premia.
-    out["c_reversal"] = _clip01((out["reversal"] + 0.10) / 0.20)
+    out["c_reversal"] = _clip01(
+        (0.10 - out["reversal"]) / 0.20 if short else (out["reversal"] + 0.10) / 0.20
+    )
 
     # Fuerza relativa frente al mercado. YA NO PUNTÚA —su peso es cero— pero se
     # sigue calculando para vigilarla en el diagnóstico por cuartiles.
-    out["c_relative_strength"] = (
-        _clip01((out["rel_strength"] + 0.05) / 0.20) if has_benchmark else np.nan
-    )
+    if not has_benchmark:
+        out["c_relative_strength"] = np.nan
+    else:
+        out["c_relative_strength"] = _clip01(
+            (0.15 - out["rel_strength"]) / 0.20
+            if short
+            else (out["rel_strength"] + 0.05) / 0.20
+        )
 
     # Volumen de la vela de reanudación frente a su media.
     if has_volume:
@@ -282,6 +397,16 @@ def _add_score(
 
     out["score"] = 100.0 * (total / weight_sum.replace(0.0, np.nan))
 
+    if params.entry_rule == "rsi2":
+        # Con dos indicadores no hay siete componentes que ponderar. Se ordena
+        # por profundidad de la sobreventa —lo más estirado primero— y nada
+        # más. Ese orden NO está demostrado: sirve para elegir cuáles caben en
+        # el mensaje cuando hay más candidatos que hueco, no para prometer que
+        # los primeros son mejores.
+        rapido = out["rsi_fast"]
+        crudo = (100.0 - rapido) if params.is_short else rapido
+        out["score"] = 100.0 * _clip01(1.0 - crudo / 50.0)
+
 
 # ── Construcción de señales ───────────────────────────────────────────────────
 
@@ -295,10 +420,12 @@ def _evaluate(
     —en vez de tener una función que decide y otra que explica— es lo que evita
     que la explicación se desincronice de la decisión real.
     """
+    # En corto el stop se apoya en el máximo del rebote, no en el mínimo.
+    swing = row["swing_high"] if params.is_short else row["swing_low"]
     levels = compute_levels(
         close=float(row["close"]),
         atr=float(row["atr"]),
-        swing_low=float(row["swing_low"]),
+        swing_low=float(swing),
         params=params,
     )
     if levels is None or not levels.is_valid:
@@ -330,7 +457,11 @@ def _evaluate(
             components=components,
             adx=float(row.get("adx", float("nan"))),
             rsi=float(row.get("rsi", float("nan"))),
-            pullback_rsi=float(row.get("rsi_min", float("nan"))),
+            pullback_rsi=float(
+                row.get("rsi_max" if params.is_short else "rsi_min", float("nan"))
+            ),
+            rsi_fast=float(row.get("rsi_fast", float("nan"))),
+            entry_rule=params.entry_rule,
         ),
         None,
     )
@@ -396,6 +527,47 @@ _STAGE_LABELS = dict(FUNNEL_STAGES)
 _POST_STAGES = ("niveles", "riesgo_beneficio", "score")
 
 
+def _funnel_labels(params: StrategyParams) -> dict[str, str]:
+    """Etiquetas del embudo que dependen del sentido o de la regla activa.
+
+    Sin esto, un escaneo en corto anunciaba "el mercado está en régimen
+    alcista" mientras filtraba justo lo contrario, y una `reversion` que no
+    mira el ADX ni el R:B mínimo aparecía en el mensaje de "hoy no hay nada"
+    como si esos dos filtros hubieran participado en la decisión.
+    """
+    short = params.is_short
+    overrides = {
+        "f_market": (
+            "el mercado está en régimen bajista" if short
+            else "el mercado está en régimen alcista"
+        ),
+        "f_regime": (
+            "el instrumento está en tendencia bajista" if short
+            else "el instrumento está en tendencia alcista"
+        ),
+    }
+    if params.entry_rule == "rsi2":
+        overrides["f_pullback"] = (
+            "está muy sobrecomprado (RSI2)" if short else "está muy sobrevendido (RSI2)"
+        )
+        # La regla `reversion` no exige ni fuerza de tendencia ni confirmación
+        # de giro: siempre pasan, así que un "0 descartados" aquí no significa
+        # que el filtro trabajara, sino que no existe para esta regla.
+        overrides["f_trend_strength"] = "fuerza de tendencia (ADX, no aplica en esta regla)"
+        overrides["f_resume"] = "confirmación de giro (no aplica en esta regla)"
+    else:
+        overrides["f_pullback"] = "hubo un rebote" if short else "hubo un retroceso"
+        overrides["f_resume"] = "está reanudando"
+
+    if params.min_risk_reward <= 0:
+        overrides["riesgo_beneficio"] = "el ratio riesgo/beneficio (sin mínimo en esta regla)"
+    else:
+        overrides["riesgo_beneficio"] = (
+            f"el ratio riesgo/beneficio llega a {params.min_risk_reward:g}"
+        )
+    return overrides
+
+
 @dataclass(frozen=True)
 class ScanFunnel:
     """Cuántos candidatos sobreviven a cada etapa del escaneo.
@@ -408,12 +580,16 @@ class ScanFunnel:
     evaluated: int = 0
     no_data: int = 0
     counts: dict[str, int] = field(default_factory=dict)
+    # Etiquetas que sustituyen a las genéricas para el sentido/regla de este
+    # escaneo. Vacío (el default) usa las de siempre.
+    labels: dict[str, str] = field(default_factory=dict)
 
     def stages(self) -> list[tuple[str, str, int, int]]:
         """(clave, etiqueta, supervivientes, descartados en esta etapa)."""
         rows: list[tuple[str, str, int, int]] = []
         alive = self.evaluated
-        for key, label in FUNNEL_STAGES:
+        for key, generic_label in FUNNEL_STAGES:
+            label = self.labels.get(key, generic_label)
             survivors = self.counts.get(key, 0)
             rows.append((key, label, survivors, alive - survivors))
             alive = survivors
@@ -500,7 +676,11 @@ def scan_with_funnel(
             found.append(signal)
 
     found.sort(key=lambda s: s.score, reverse=True)
-    return found, ScanFunnel(evaluated=evaluated, no_data=no_data, counts=counts)
+    funnel = ScanFunnel(
+        evaluated=evaluated, no_data=no_data, counts=counts,
+        labels=_funnel_labels(params),
+    )
+    return found, funnel
 
 
 def scan(

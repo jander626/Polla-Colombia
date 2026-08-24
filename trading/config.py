@@ -106,6 +106,37 @@ class StrategyParams:
     evita que un barrido de parámetros contamine al siguiente.
     """
 
+    # Qué dispara la entrada. Dos reglas, no una rejilla:
+    #
+    #   "retroceso" — la de siempre: seis filtros encadenados.
+    #   "rsi2"      — dos indicadores, EMA200 y RSI(2). Medida el 24 de agosto
+    #                 de 2026 contra cinco alternativas declaradas de antemano
+    #                 y sobre instrumentos Y fechas reservados; salió la mejor
+    #                 de las seis y la única positiva en el cuadrante que no
+    #                 compartía nada. Ver MEDICION_ESTRATEGIA.md.
+    #
+    # Sigue SIN demostrar ventaja: su límite inferior es negativo. Es la mejor
+    # candidata disponible, que no es lo mismo.
+    entry_rule: str = "retroceso"
+
+    # Umbrales de la regla "rsi2". El exceso medido es positivo en TODO el
+    # rango 5-25 del umbral y 100-250 de la media, así que no es un filo de
+    # cuchillo; se dejan los valores centrales y no los mejores, que es lo
+    # que evita que la elección misma sea el sobreajuste.
+    rsi_fast_period: int = 2
+    rsi2_entry_max: float = 10.0
+
+    # Sentido de la operación: "long" o "short".
+    #
+    # No es una estrategia distinta sino la misma reflejada: retroceso dentro
+    # de una tendencia, entrando cuando reanuda. En corto la tendencia es
+    # bajista, el "retroceso" es un rebote y la reanudación es la vuelta a
+    # caer. Vive en los parámetros —y no como argumento suelto— para que el
+    # backtest pueda barrer sentidos igual que barre cualquier otro umbral, y
+    # para que entre en `signature` (una calibración de largos no describe
+    # cortos).
+    direction: str = "long"
+
     # Filtro 1 — régimen alcista
     ema_fast: int = 20
     ema_mid: int = 50
@@ -204,6 +235,10 @@ class StrategyParams:
     # Barras mínimas de historia para que los indicadores sean fiables. El
     # momentum a 12 meses es ahora el indicador más exigente en historia.
     @property
+    def is_short(self) -> bool:
+        return self.direction == "short"
+
+    @property
     def min_bars(self) -> int:
         return max(self.ema_slow, self.momentum_window + self.momentum_skip) + 60
 
@@ -222,6 +257,8 @@ class StrategyParams:
         backtest de ESTA estrategia, o no significa nada.
         """
         parts = [
+            f"rule={self.entry_rule}:{self.rsi2_entry_max}",
+            f"dir={self.direction}",
             f"w={sorted(self.weights)}",
             f"regime={self.use_market_regime_filter}:{self.market_regime_ma}",
             f"adx={self.adx_min}",
@@ -306,27 +343,69 @@ SEARCH_WEIGHTS: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = (
 )
 
 
-def search_grid() -> dict[str, "StrategyParams"]:
-    """Las 27 combinaciones de estrategia que barre `backtest --search`.
+# ── Presets de estrategia ────────────────────────────────────────────────────
+
+def reversion_params() -> "StrategyParams":
+    """La regla de dos indicadores, con la salida que comparte su tesis.
+
+    La entrada dice "el precio se pasó y volverá a su sitio". Eso tiene un
+    horizonte de días y un objetivo cercano, no un movimiento de 3 ATR a 30
+    días. Emparejarla con la salida de tendencia no es un ajuste subóptimo:
+    son dos tesis distintas pegadas una detrás de otra, y medido cuesta 19
+    puntos de acierto (24% contra 43%).
+
+    `min_risk_reward` se pone a cero a propósito: con un objetivo de 1 ATR y
+    un stop de ~0.8 ATR, el suelo de 1.5 vetaría la estrategia entera. El
+    filtro existía para descartar retrocesos demasiado profundos, que es un
+    problema de la OTRA regla.
+    """
+    return replace(
+        StrategyParams(),
+        entry_rule="rsi2",
+        target_atr_mult=1.00,
+        min_risk_reward=0.0,
+    )
+
+
+def reversion_backtest() -> "BacktestParams":
+    """El plazo corto que le corresponde a la entrada por reversión."""
+    return replace(DEFAULT_BACKTEST, max_holding_days=5)
+
+
+def search_grid(directions: tuple[str, ...] = ("long",)) -> dict[str, "StrategyParams"]:
+    """Las 27 combinaciones de estrategia (por sentido) que barre `--search`.
 
     El umbral de reanudación va SIEMPRE atado al de retroceso. Si el RSI "cae
     por debajo de 55" y basta con "estar por encima de 45" para darlo por
     reanudado, un RSI plano en 50 cumpliría las dos condiciones a la vez y la
     búsqueda encontraría "ventaja" en un filtro que no filtra nada.
+
+    `directions` multiplica la rejilla, no la reemplaza. Barrer los dos
+    sentidos son 54 combinaciones × 3 salidas = 162 mediciones, y **cuantas
+    más se prueban, más fácil es que una parezca buena por azar**: con 162
+    intentos, ver una con `p < 0.01` no dice nada por sí solo. Por eso
+    `run_search` parte la muestra y ordena por validación, y por eso el
+    veredicto lo da el límite inferior en validación y nunca la media en
+    entrenamiento. El barrido anterior ya devolvió 0 de 81; el número de
+    intentos es justamente lo que hace que ese 0 no sea sorprendente.
     """
-    base = StrategyParams()
     grid: dict[str, StrategyParams] = {}
-    for rsi in SEARCH_PULLBACK_RSI:
-        for weight_name, weights in SEARCH_WEIGHTS:
-            for adx in SEARCH_ADX_MIN:
-                label = f"rsi{rsi:.0f}·{weight_name}·adx{adx:.0f}"
-                grid[label] = replace(
-                    base,
-                    pullback_rsi_max=rsi,
-                    resume_rsi_min=rsi,
-                    adx_min=adx,
-                    weights=weights,
-                )
+    for direction in directions:
+        base = StrategyParams(direction=direction)
+        # Solo se etiqueta el sentido cuando hay más de uno, para no cambiar
+        # las etiquetas de los barridos largos ya publicados.
+        prefix = f"{direction}·" if len(directions) > 1 else ""
+        for rsi in SEARCH_PULLBACK_RSI:
+            for weight_name, weights in SEARCH_WEIGHTS:
+                for adx in SEARCH_ADX_MIN:
+                    label = f"{prefix}rsi{rsi:.0f}·{weight_name}·adx{adx:.0f}"
+                    grid[label] = replace(
+                        base,
+                        pullback_rsi_max=rsi,
+                        resume_rsi_min=rsi,
+                        adx_min=adx,
+                        weights=weights,
+                    )
     return grid
 
 
@@ -432,6 +511,20 @@ MAX_LLM_PENALTY = 25.0
 # "suficiente para operar". Por debajo de este umbral la alerta lo dice.
 MIN_MEANINGFUL_EXPECTANCY = 0.05
 
+# Regla de decisión del seguimiento en vivo, fijada el 24 de agosto de 2026
+# ANTES de mirar el resultado — para que dentro de unos meses no se reescriba
+# alrededor del número que haya salido. Con esta cantidad de operaciones
+# cerradas, `/rendimiento` da un veredicto: si el límite inferior de la R
+# media (Wilson/normal, `risk.mean_lower_bound`) es positivo, el cribador
+# sigue; si no lo es, se apaga y el dinero va al índice. Antes de esa cifra
+# no hay veredicto, solo progreso — decidir con menos muestra es el mismo
+# error que "mayor que cero" ya costó dos veces en este proyecto.
+#
+# 200 sale de MEDICION_ESTRATEGIA.md: con la regla `reversion` en vivo
+# (~3 señales/día en 141 instrumentos) son unos meses, no los ~12 años que
+# pedía la regla de seis filtros.
+LIVE_DECISION_SAMPLE = 200
+
 
 @dataclass(frozen=True)
 class BacktestParams:
@@ -447,6 +540,18 @@ class BacktestParams:
     # Coste de ida y vuelta como fracción del precio de entrada. Quantfury no
     # cobra comisión pero opera sobre el spread; esto lo aproxima.
     round_trip_cost: float = 0.0010
+    # Una posición por instrumento a la vez, como en vivo.
+    #
+    # No es un ajuste: es corregir una divergencia real. El escaneo en vivo NO
+    # repite señal sobre un símbolo que ya tiene posición abierta
+    # (`trading_bot._prepare_delivery`), pero el backtest sí las simulaba
+    # todas. Cualquier regla que dispare varios días seguidos —una sobreventa
+    # que dura tres sesiones— quedaba medida como tres operaciones que el
+    # usuario nunca habría podido tomar, y casi siempre peores que la primera.
+    #
+    # El invariante del proyecto es que el backtest y el escaneo en vivo
+    # describan lo mismo. Con esto en False dejan de hacerlo.
+    one_position_per_symbol: bool = True
     # Si una misma vela toca stop y objetivo, no sabemos cuál llegó primero.
     # Contarlo como pérdida sesga el backtest en contra, que es el lado
     # correcto en el que equivocarse.

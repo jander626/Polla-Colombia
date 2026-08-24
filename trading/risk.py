@@ -80,20 +80,36 @@ def mean_lower_bound(
 
 @dataclass(frozen=True)
 class Levels:
-    entry_max: float      # techo de la orden condicional de compra
+    """Los tres precios de la operación, en cualquiera de los dos sentidos.
+
+    `entry_max` conserva su nombre por compatibilidad con los registros ya
+    guardados en `trading_state.json`, pero es *el límite de la entrada*: un
+    techo en largo (no compres por encima) y un suelo en corto (no vendas por
+    debajo). `risk_per_unit` y `reward_per_unit` son siempre magnitudes
+    positivas, así que la R se calcula igual en los dos sentidos.
+    """
+
+    entry_max: float      # límite de la orden condicional: techo en largo, suelo en corto
     stop: float
     target: float
     risk_reward: float
     risk_per_unit: float
     reward_per_unit: float
+    direction: str = "long"
+
+    @property
+    def is_short(self) -> bool:
+        return self.direction == "short"
 
     @property
     def is_valid(self) -> bool:
-        return (
-            self.risk_per_unit > 0
-            and self.reward_per_unit > 0
-            and self.stop < self.entry_max < self.target
-        )
+        if not (self.risk_per_unit > 0 and self.reward_per_unit > 0):
+            return False
+        if self.is_short:
+            # En corto el orden se invierte por completo: el stop queda por
+            # encima de la entrada y el objetivo por debajo.
+            return self.target < self.entry_max < self.stop
+        return self.stop < self.entry_max < self.target
 
 
 def compute_levels(
@@ -104,45 +120,69 @@ def compute_levels(
 ) -> Levels | None:
     """Calcula los tres precios de la operación. Devuelve None si no son coherentes.
 
-    La entrada es un *techo*, no un precio fijo: el escaneo corre antes de la
+    La entrada es un *límite*, no un precio fijo: el escaneo corre antes de la
     apertura y no sabemos a qué precio abrirá. Si el instrumento abre con un
-    hueco alcista fuerte, el precio ya no es el que justificaba la señal y la
+    hueco fuerte a favor, el precio ya no es el que justificaba la señal y la
     operación simplemente no se ejecuta. Esto evita perseguir.
 
-    El stop se apoya en estructura real de precio —el mínimo del retroceso—,
+    El stop se apoya en estructura real de precio —el extremo del retroceso—,
     con una distancia mínima para no salir por puro ruido intradía. Un
     retroceso muy profundo produce un stop lejano y un ratio riesgo/beneficio
     pobre, y la señal acaba descartada por el filtro de R:B; eso es deliberado,
     porque un retroceso así ya no es un descanso sino un cambio de tendencia.
 
-    El objetivo es puro ATR. El máximo reciente no lo recorta: ver la nota en
+    El objetivo es puro ATR. El extremo reciente no lo recorta: ver la nota en
     `StrategyParams.resistance_lookback`.
+
+    En corto todo se refleja: `swing_low` pasa a ser el máximo del rebote, la
+    entrada es un suelo, el stop queda por encima y el objetivo por debajo. La
+    aritmética es idéntica con los signos cambiados, y hay un test que lo fija
+    reflejando una serie de precios entera
+    (`test_short.py::test_los_niveles_son_el_espejo_exacto_del_largo`).
     """
     if not all(math.isfinite(x) for x in (close, atr, swing_low)):
         return None
     if close <= 0 or atr <= 0:
         return None
 
-    entry_max = close + params.entry_buffer_atr * atr
+    if params.is_short:
+        # `swing_low` trae aquí el máximo del rebote (lo pasa `strategy`).
+        entry_limit = close - params.entry_buffer_atr * atr
 
-    stop_by_structure = swing_low - params.stop_buffer_atr * atr
-    stop_min_distance = entry_max - params.min_stop_atr * atr
-    stop = min(stop_by_structure, stop_min_distance)
+        stop_by_structure = swing_low + params.stop_buffer_atr * atr
+        stop_min_distance = entry_limit + params.min_stop_atr * atr
+        stop = max(stop_by_structure, stop_min_distance)
 
-    target = entry_max + params.target_atr_mult * atr
+        target = entry_limit - params.target_atr_mult * atr
 
-    risk = entry_max - stop
-    reward = target - entry_max
-    if risk <= 0 or reward <= 0:
-        return None
+        risk = stop - entry_limit
+        reward = entry_limit - target
+        # Un objetivo por debajo de cero no es operable: el precio no puede
+        # caer tanto. Pasa en instrumentos muy baratos con ATR grande.
+        if risk <= 0 or reward <= 0 or target <= 0:
+            return None
+    else:
+        entry_limit = close + params.entry_buffer_atr * atr
+
+        stop_by_structure = swing_low - params.stop_buffer_atr * atr
+        stop_min_distance = entry_limit - params.min_stop_atr * atr
+        stop = min(stop_by_structure, stop_min_distance)
+
+        target = entry_limit + params.target_atr_mult * atr
+
+        risk = entry_limit - stop
+        reward = target - entry_limit
+        if risk <= 0 or reward <= 0:
+            return None
 
     return Levels(
-        entry_max=entry_max,
+        entry_max=entry_limit,
         stop=stop,
         target=target,
         risk_reward=reward / risk,
         risk_per_unit=risk,
         reward_per_unit=reward,
+        direction=params.direction,
     )
 
 

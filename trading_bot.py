@@ -21,9 +21,20 @@ exceso sobre comprar y mantener el índice es indistinguible de cero, y la
 puntuación técnica no ordena. Publicar un porcentaje de confianza sobre eso
 habría sido la única parte del bot capaz de costar dinero de verdad.
 
-Lo que sí aporta: reduce 141 gráficos a los pocos que cumplen seis filtros, y
-deja calculados la zona de entrada, el stop estructural y el ratio
+Lo que sí aporta: reduce 141 gráficos a los pocos que cumplen la regla activa,
+y deja calculados la zona de entrada, el stop estructural y el ratio
 riesgo/beneficio. La decisión es del usuario.
+
+**Regla de entrada, desde el 24 de agosto de 2026: `reversion`** (EMA200 +
+RSI de 2 sesiones), no la de seis filtros. Se midió contra cinco alternativas
+declaradas de antemano, con instrumentos Y fechas reservados —no solo
+fechas—, y salió mejor en todo lo comparable: R media, límite inferior del
+exceso, y sobre todo frecuencia (~3 señales/día en 141 instrumentos, contra
+~0.6 de la regla vieja). Sigue SIN demostrar ventaja —el límite inferior del
+exceso es negativo—, pero es la única con la que demostrarla es alcanzable en
+un plazo razonable: al ritmo antiguo hacían falta décadas de seguimiento en
+vivo para juntar la muestra. Detalle completo en `MEDICION_ESTRATEGIA.md`.
+La regla vieja sigue disponible con `--regla retroceso`, para comparar.
 """
 
 from __future__ import annotations
@@ -53,6 +64,8 @@ from trading.config import (
     STATE_FILE,
     StrategyParams,
     replace,
+    reversion_backtest,
+    reversion_params,
     search_grid,
     variants,
 )
@@ -64,6 +77,24 @@ from trading.strategy import Signal, scan_with_funnel
 from trading.universe import BENCHMARK_SYMBOL, Instrument
 
 TRADING_DAYS_PER_YEAR = 252
+
+
+def _directions(args: argparse.Namespace) -> tuple[str, ...]:
+    """Sentidos pedidos en la línea de comandos."""
+    choice = getattr(args, "direction", "long")
+    return ("long", "short") if choice == "both" else (choice,)
+
+
+def _rule_params(args: argparse.Namespace) -> tuple[StrategyParams, "object"]:
+    """Estrategia y plazo que pide la línea de comandos.
+
+    Las dos van juntas y no por separado porque la salida es parte de la
+    hipótesis: la entrada por reversión con la salida de tendencia mide 19
+    puntos de acierto menos que con la suya.
+    """
+    if getattr(args, "regla", "retroceso") == "reversion":
+        return reversion_params(), reversion_backtest()
+    return DEFAULT_PARAMS, DEFAULT_BACKTEST
 
 
 # ── Datos ─────────────────────────────────────────────────────────────────────
@@ -208,7 +239,12 @@ def _send_delivery(
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    params = DEFAULT_PARAMS
+    # El sentido por defecto es solo largos, y no por conservadurismo: los
+    # cortos todavía no tienen ninguna medición detrás. Activarlos en vivo
+    # antes de medirlos sería repetir el error del porcentaje de confianza —
+    # publicar como operable algo cuya ventaja nadie ha comprobado— y esta vez
+    # con la deriva del mercado en contra. Se habilitan con --direction.
+    directions = _directions(args)
     state = TradingState.load(STATE_FILE)
     client = notify.TelegramClient()
 
@@ -219,6 +255,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return 0
         print(f"[INFO] Escaneando: {reason}")
 
+    base, _ = _rule_params(args)
+    params = replace(base, direction=directions[0])
     instruments = list(universe.ALL_INSTRUMENTS)
     bars, benchmark = _load_bars(instruments, params.min_bars + 60, args.offline)
     if not bars:
@@ -230,9 +268,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
     print(f"[INFO] Superan el filtro de liquidez: {len(liquid)}/{len(bars)}")
 
-    signals, funnel = scan_with_funnel(liquid, bars, params, benchmark)
-    print("[INFO] Embudo del escaneo:")
-    print(funnel.summary())
+    signals: list[Signal] = []
+    funnel = None
+    for direction in directions:
+        side = replace(base, direction=direction)
+        found, side_funnel = scan_with_funnel(liquid, bars, side, benchmark)
+        if len(directions) > 1:
+            print(f"[INFO] Embudo del escaneo ({direction}):")
+        else:
+            print("[INFO] Embudo del escaneo:")
+        print(side_funnel.summary())
+        signals += found
+        funnel = funnel or side_funnel
 
     calibration = Calibration.load(CALIBRATION_FILE)
     stale = calibration.is_calibrated and not calibration.matches(params)
@@ -314,8 +361,94 @@ def cmd_track(args: argparse.Namespace) -> int:
 
 # ── Comandos de Telegram ──────────────────────────────────────────────────────
 
-def _handle_command(command: str, chat_id: str, state: TradingState,
-                    client: notify.TelegramClient) -> None:
+def _manual_taken(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/tomada SÍMBOLO PRECIO`."""
+    if len(args) < 2:
+        return notify.format_manual_usage("/tomada"), False
+
+    symbol = args[0]
+    price = notify.parse_price(args[1])
+    if price is None:
+        return notify.format_manual_error("bad_price", symbol), False
+
+    update = state.mark_taken(symbol, price)
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, symbol, state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_taken(update.record, update.warning), True
+
+
+def _manual_close(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/cerrar SÍMBOLO SALIDA [ENTRADA]`.
+
+    La entrada es opcional porque lo normal es que ya la haya dado `/tomada`.
+    Se acepta en el mismo mensaje para que el usuario que no la registró en su
+    momento pueda cerrar sin tener que reconstruir el pasado en dos pasos.
+    """
+    if len(args) < 2:
+        return notify.format_manual_usage("/cerrar"), False
+
+    symbol = args[0]
+    exit_price = notify.parse_price(args[1])
+    entry_price = notify.parse_price(args[2]) if len(args) > 2 else None
+    if exit_price is None or (len(args) > 2 and entry_price is None):
+        return notify.format_manual_error("bad_price", symbol), False
+
+    update = state.close_manually(symbol, exit_price, entry_price)
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, symbol, state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_manual_close(update.record), True
+
+
+def _manual_skip(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/paso SÍMBOLO`."""
+    if not args:
+        return notify.format_manual_usage("/paso"), False
+
+    update = state.mark_skipped(args[0])
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, args[0], state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_skipped(update.record), True
+
+
+def _handle_command(command: str, args: list[str], chat_id: str,
+                    state: TradingState, client: notify.TelegramClient) -> bool:
+    """Atiende un comando. Devuelve True si tocó el seguimiento.
+
+    Los tres comandos que corrigen el seguimiento (`/tomada`, `/cerrar`,
+    `/paso`) son los únicos que escriben algo que no se puede recuperar
+    volviendo a mirar el mercado: describen lo que el usuario hizo en su
+    cuenta, y el bot no tiene otra forma de saberlo.
+    """
+    if command in ("/tomada", "/tomado"):
+        text, changed = _manual_taken(args, state)
+        client.send(chat_id, text)
+        return changed
+
+    if command in ("/cerrar", "/cerrada"):
+        text, changed = _manual_close(args, state)
+        client.send(chat_id, text)
+        return changed
+
+    if command in ("/paso", "/notomada"):
+        text, changed = _manual_skip(args, state)
+        client.send(chat_id, text)
+        return changed
+
     if command in ("/ayuda", "/start", "/help"):
         client.send(chat_id, notify.format_help())
 
@@ -330,24 +463,25 @@ def _handle_command(command: str, chat_id: str, state: TradingState,
             for record in state.open_signals:
                 inst = universe.get(record["symbol"])
                 d = inst.price_decimals
+                # Si el usuario ya dijo a qué precio entró, se le enseña su
+                # número: es el que tiene delante en Quantfury.
+                if record.get("real_entry_price") is not None:
+                    head = f"entrada {record['real_entry_price']:.{d}f}"
+                else:
+                    head = f"entrada ≤{record['entry_max']:.{d}f}"
                 lines.append(
-                    f"• *{record['symbol']}* — entrada ≤{record['entry_max']:.{d}f} · "
+                    f"• *{record['symbol']}* — {head} · "
                     f"objetivo {record['target']:.{d}f} · stop {record['stop']:.{d}f}"
                 )
+            lines += [
+                "",
+                "_Si saliste de alguna, dímelo con /cerrar SÍMBOLO PRECIO. "
+                "Si no llegaste a tomarla, /paso SÍMBOLO._",
+            ]
             client.send(chat_id, "\n".join(lines))
 
     elif command in ("/senales", "/señales"):
-        recent = state.history[-5:]
-        if not recent:
-            client.send(chat_id, "Todavía no hay señales cerradas.")
-        else:
-            lines = ["🗒️ *ÚLTIMAS SEÑALES CERRADAS*", ""]
-            for record in reversed(recent):
-                mark = "✅" if record.get("is_win") else "❌"
-                ret = record.get("return_pct")
-                tail = f" ({ret * 100:+.1f}%)" if ret is not None else ""
-                lines.append(f"{mark} {record['symbol']} — {record.get('outcome')}{tail}")
-            client.send(chat_id, "\n".join(lines))
+        client.send(chat_id, notify.format_recent(state.history))
 
     elif command in ("/instrumentos", "/universo"):
         client.send(
@@ -361,6 +495,8 @@ def _handle_command(command: str, chat_id: str, state: TradingState,
         )
     else:
         client.send(chat_id, "Comando desconocido. Usa /ayuda.")
+
+    return False
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -388,9 +524,11 @@ def cmd_poll(args: argparse.Namespace) -> int:
         if not text.startswith("/"):
             continue
 
-        command = text.split()[0].lower().split("@")[0]
+        parts = text.split()
+        command = parts[0].lower().split("@")[0]
         print(f"[INFO] Comando '{command}' de {chat_id}")
-        _handle_command(command, chat_id, state, client)
+        if _handle_command(command, parts[1:], chat_id, state, client):
+            changed = True
 
     if changed:
         state.save(STATE_FILE)
@@ -400,7 +538,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
 # ── Backtest ──────────────────────────────────────────────────────────────────
 
 def cmd_backtest(args: argparse.Namespace) -> int:
-    params = DEFAULT_PARAMS
+    directions = _directions(args)
+    base, bt_base = _rule_params(args)
+    params = replace(base, direction=directions[0])
     bars_needed = args.years * TRADING_DAYS_PER_YEAR + params.min_bars
     instruments = list(universe.ALL_INSTRUMENTS)
 
@@ -420,7 +560,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         # Barrido completo en una sola pasada. Es el modo que responde "qué
         # habría funcionado estos años" sin ir de variante en variante, y el
         # que hace falta cuando ya no queda una hipótesis clara que probar.
-        grid = search_grid()
+        grid = search_grid(directions)
         print(
             f"[INFO] Barriendo {len(grid)} combinaciones × {len(SEARCH_TRAILS)} "
             f"salidas = {len(grid) * len(SEARCH_TRAILS)} mediciones"
@@ -453,7 +593,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         )
         return 0
 
-    report = run_backtest(tradable, bars, params, DEFAULT_BACKTEST, benchmark)
+    report = run_backtest(tradable, bars, params, bt_base, benchmark)
     print()
     print(report.summary())
 
@@ -533,12 +673,36 @@ def main() -> int:
             p.add_argument("--dry-run", action="store_true", help="No envía nada")
         return p
 
-    p = common(sub.add_parser("auto", help="Modo del cron"))
+    def with_rule(p):
+        p.add_argument(
+            "--regla",
+            choices=("retroceso", "reversion"),
+            # Desde el 24 de agosto de 2026 el cribador en vivo usa la regla
+            # de dos indicadores por defecto: es igual o mejor que la de seis
+            # filtros en todo lo medido (MEDICION_ESTRATEGIA.md) y, sobre
+            # todo, da ~3 señales al día en vez de ~0.6 — al ritmo antiguo
+            # habrían hecho falta décadas para acumular la muestra que exige
+            # demostrar algo con el seguimiento en vivo.
+            default="reversion",
+            help="Regla de entrada (por defecto: EMA200 + RSI de 2 sesiones)",
+        )
+        return p
+
+    def with_direction(p):
+        p.add_argument(
+            "--direction",
+            choices=("long", "short", "both"),
+            default="long",
+            help="Sentido de las operaciones (por defecto: solo largos)",
+        )
+        return p
+
+    p = with_rule(with_direction(common(sub.add_parser("auto", help="Modo del cron"))))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_auto)
 
-    p = common(sub.add_parser("scan", help="Escaneo del día"))
+    p = with_rule(with_direction(common(sub.add_parser("scan", help="Escaneo del día"))))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_scan)
@@ -551,7 +715,7 @@ def main() -> int:
     )
     sub.add_parser("test", help="Mensaje de prueba").set_defaults(func=cmd_test)
 
-    p = sub.add_parser("backtest", help="Mide la ventaja y calibra")
+    p = with_rule(with_direction(sub.add_parser("backtest", help="Mide la ventaja y calibra")))
     p.add_argument("--years", type=int, default=DEFAULT_BACKTEST.years)
     p.add_argument("--write", action="store_true", help="Guarda calibration.json")
     p.add_argument("--offline", action="store_true", help="Usa solo la caché")
@@ -573,6 +737,7 @@ def main() -> int:
     for flag, default in (
         ("offline", False), ("dry_run", False), ("force", False),
         ("no_llm", False), ("compare", False), ("search", False),
+        ("direction", "long"), ("regla", "reversion"),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)

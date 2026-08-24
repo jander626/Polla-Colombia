@@ -62,6 +62,11 @@ class Trade:
     r_multiple: float = float("nan")
     return_pct: float = float("nan")
     bars_held: int = 0
+    direction: str = "long"
+
+    @property
+    def is_short(self) -> bool:
+        return self.direction == "short"
 
     @property
     def was_filled(self) -> bool:
@@ -77,14 +82,49 @@ class Trade:
         return self.was_filled and np.isfinite(self.return_pct) and self.return_pct > 0
 
 
-def _stop_outcome(exit_price: float, entry_price: float) -> Outcome:
-    """Salir por el stop no implica perder cuando el stop ha subido.
+def _stop_outcome(exit_price: float, entry_price: float, short: bool = False) -> Outcome:
+    """Salir por el stop no implica perder cuando el stop ha acompañado al precio.
 
-    Con trailing, un stop alcanzado por encima de la entrada es una ganadora
-    recortada, no una pérdida. Etiquetarla como "loss" haría que el porcentaje
-    de acierto contase al revés justo en las operaciones que el trailing salva.
+    Con trailing, un stop alcanzado por encima de la entrada (o por debajo, en
+    corto) es una ganadora recortada, no una pérdida. Etiquetarla como "loss"
+    haría que el porcentaje de acierto contase al revés justo en las
+    operaciones que el trailing salva.
     """
+    if short:
+        return "win" if exit_price < entry_price else "loss"
     return "win" if exit_price > entry_price else "loss"
+
+
+def simulate_sequence(
+    signals: list[Signal], df: pd.DataFrame, bt: BacktestParams
+) -> list[Trade]:
+    """Simula las señales de UN instrumento respetando la posición abierta.
+
+    Existe porque el escaneo en vivo no repite señal sobre un símbolo que ya
+    tiene posición (`trading_bot._prepare_delivery`) y el backtest sí las
+    simulaba todas. Una sobreventa que dura tres sesiones se contaba como tres
+    operaciones que el usuario nunca habría podido tomar —y las dos últimas
+    entran más caro, así que la medida salía peor que la realidad.
+
+    Vive aquí, en una sola función, porque hay dos rutas que simulan
+    (`run_backtest` y `run_search`) y un test exige que den lo mismo. Cuando
+    la regla vivía suelta en una de las dos, ese test la cazó.
+    """
+    trades: list[Trade] = []
+    libre_desde: Optional[pd.Timestamp] = None
+
+    for signal in signals:
+        if (
+            bt.one_position_per_symbol
+            and libre_desde is not None
+            and signal.bar_date < libre_desde
+        ):
+            continue
+        trade = simulate_signal(signal, df, bt)
+        trades.append(trade)
+        if trade.exit_date is not None:
+            libre_desde = trade.exit_date
+    return trades
 
 
 def simulate_signal(
@@ -108,6 +148,8 @@ def simulate_signal(
             components=dict(signal.components),
         )
 
+    short = levels.is_short
+
     base = Trade(
         symbol=signal.symbol,
         asset_class=signal.asset_class,
@@ -117,6 +159,7 @@ def simulate_signal(
         stop=levels.stop,
         target=levels.target,
         components=dict(signal.components),
+        direction=levels.direction,
     )
 
     # ── Fase 1: ¿se llega a ejecutar la orden condicional? ────────────────────
@@ -127,18 +170,29 @@ def simulate_signal(
     last = min(signal_pos + bt.entry_valid_days, len(df) - 1)
     for pos in range(first, last + 1):
         bar = df.iloc[pos]
-        if bar["open"] <= levels.entry_max:
-            entry_pos, entry_price = pos, float(bar["open"])
-            break
-        if bar["low"] <= levels.entry_max:
-            entry_pos, entry_price = pos, float(levels.entry_max)
-            break
+        if short:
+            # Venta limitada en el suelo de entrada: ejecuta si el precio llega
+            # a ese nivel o por encima. La apertura manda sobre el nivel
+            # teórico, igual que en largo.
+            if bar["open"] >= levels.entry_max:
+                entry_pos, entry_price = pos, float(bar["open"])
+                break
+            if bar["high"] >= levels.entry_max:
+                entry_pos, entry_price = pos, float(levels.entry_max)
+                break
+        else:
+            if bar["open"] <= levels.entry_max:
+                entry_pos, entry_price = pos, float(bar["open"])
+                break
+            if bar["low"] <= levels.entry_max:
+                entry_pos, entry_price = pos, float(levels.entry_max)
+                break
 
     if entry_pos is None or not math.isfinite(entry_price) or entry_price <= 0:
         return base
 
-    if entry_price - levels.stop <= 0:
-        # Un hueco bajista puede dejar la entrada por debajo del stop; la
+    if (levels.stop - entry_price if short else entry_price - levels.stop) <= 0:
+        # Un hueco en contra puede dejar la entrada ya pasada del stop; la
         # operación deja de tener sentido y no se toma.
         return base
 
@@ -149,7 +203,9 @@ def simulate_signal(
     # menor de 1R — y usar el riesgo realizado lo contaría como 1R completo,
     # exagerando las pérdidas y amplificando artificialmente las ganancias de
     # las entradas con hueco.
-    planned_risk = levels.entry_max - levels.stop
+    planned_risk = (
+        levels.stop - levels.entry_max if short else levels.entry_max - levels.stop
+    )
 
     # ── Fase 2: resolución por primer toque ──────────────────────────────────
     exit_pos = min(entry_pos + bt.max_holding_days, len(df) - 1)
@@ -169,28 +225,35 @@ def simulate_signal(
         open_, high, low = float(bar["open"]), float(bar["high"]), float(bar["low"])
 
         # Huecos: la apertura manda sobre el nivel teórico.
-        if open_ <= stop:
-            outcome, exit_price, exit_at = _stop_outcome(open_, entry_price), open_, pos
+        if (open_ >= stop) if short else (open_ <= stop):
+            outcome, exit_price, exit_at = (
+                _stop_outcome(open_, entry_price, short), open_, pos
+            )
             break
-        if target_exits and open_ >= levels.target:
+        if target_exits and ((open_ <= levels.target) if short else (open_ >= levels.target)):
             outcome, exit_price, exit_at = "win", open_, pos
             break
 
-        hit_stop = low <= stop
-        hit_target = target_exits and high >= levels.target
+        hit_stop = high >= stop if short else low <= stop
+        hit_target = target_exits and (
+            low <= levels.target if short else high >= levels.target
+        )
 
         if hit_stop and hit_target:
             # Vela ambigua: sin datos intradía no sabemos el orden. Contarla
             # como pérdida sesga el backtest en contra, que es el lado
-            # correcto en el que equivocarse.
+            # correcto en el que equivocarse — y en corto todavía más, porque
+            # ahí la vela ambigua suele ser un hueco de resultados.
             if bt.ambiguous_bar_is_loss:
-                outcome, exit_price = _stop_outcome(stop, entry_price), stop
+                outcome, exit_price = _stop_outcome(stop, entry_price, short), stop
             else:
                 outcome, exit_price = "win", float(levels.target)
             exit_at = pos
             break
         if hit_stop:
-            outcome, exit_price, exit_at = _stop_outcome(stop, entry_price), float(stop), pos
+            outcome, exit_price, exit_at = (
+                _stop_outcome(stop, entry_price, short), float(stop), pos
+            )
             break
         if hit_target:
             outcome, exit_price, exit_at = "win", float(levels.target), pos
@@ -206,11 +269,19 @@ def simulate_signal(
         # cerrando la operación en un nivel que aún no existía. Por eso el stop
         # que se aplica en la barra N solo usa máximos de barras anteriores.
         if trailing:
-            stop = max(stop, high - bt.trail_atr_mult * signal.atr)
+            # En corto el trailing solo BAJA, siguiendo a los mínimos.
+            stop = (
+                min(stop, low + bt.trail_atr_mult * signal.atr)
+                if short
+                else max(stop, high - bt.trail_atr_mult * signal.atr)
+            )
 
-    gross_return = (exit_price - entry_price) / entry_price
+    # En corto se gana cuando el precio baja: el signo del movimiento se
+    # invierte, pero el coste de ida y vuelta se sigue restando igual.
+    move = (entry_price - exit_price) if short else (exit_price - entry_price)
+    gross_return = move / entry_price
     net_return = gross_return - bt.round_trip_cost
-    r_multiple = (exit_price - entry_price) / planned_risk
+    r_multiple = move / planned_risk
 
     return Trade(
         symbol=signal.symbol,
@@ -228,6 +299,7 @@ def simulate_signal(
         r_multiple=r_multiple,
         return_pct=net_return,
         bars_held=exit_at - entry_pos,
+        direction=levels.direction,
     )
 
 
@@ -542,8 +614,7 @@ def run_backtest(
             continue
 
         report.signals_generated += len(signals)
-        for signal in signals:
-            report.trades.append(simulate_signal(signal, df, bt))
+        report.trades.extend(simulate_sequence(signals, df, bt))
 
     report.notes.append(
         "Sesgo de supervivencia: el universo son los instrumentos líquidos de hoy, "
@@ -705,7 +776,9 @@ def run_search(
         print(f"[INFO] ({position}/{len(grid)}) {label}…")
 
         generated = 0
-        pending: list[tuple[Signal, pd.DataFrame]] = []
+        # Por instrumento, no una lista plana: `simulate_sequence` necesita
+        # ver las señales de un mismo símbolo juntas y en orden.
+        pending: list[tuple[list[Signal], pd.DataFrame]] = []
         for instrument in instruments:
             df = bars.get(instrument.symbol)
             if df is None or len(df) < params.min_bars:
@@ -720,13 +793,17 @@ def run_search(
                 print(f"[WARN] {instrument.symbol}: {exc}")
                 continue
             generated += len(signals)
-            pending.extend((signal, df) for signal in signals)
+            if signals:
+                pending.append((signals, df))
 
         for trail in trails:
             bt = replace(base_bt, trail_atr_mult=trail)
             report = BacktestReport()
             report.signals_generated = generated
-            report.trades = [simulate_signal(s, df, bt) for s, df in pending]
+            report.trades = [
+                t for signals, df in pending
+                for t in simulate_sequence(signals, df, bt)
+            ]
 
             head = report.headline()
             train_ops, train_lower, test_ops, test_avg, test_lower = _half_metrics(
@@ -868,7 +945,17 @@ class BenchmarkComparison:
 def benchmark_comparison(
     report: "BacktestReport", benchmark_close: pd.Series
 ) -> Optional[BenchmarkComparison]:
-    """Compara cada operación con el índice en su mismo intervalo de fechas."""
+    """Compara cada operación con el índice en su mismo intervalo de fechas.
+
+    **El nulo tiene que llevar el mismo sentido que la operación.** Para un
+    largo, el nulo es comprar el índice esos días; para un corto, es VENDERLO.
+    Comparar un corto contra comprar el índice no mide selección: mide el signo
+    del mercado, y haría que los cortos parecieran catastróficos en un mercado
+    alcista y geniales en uno bajista sin que la estrategia tuviera nada que
+    ver. Es la comparación que decidió que este proyecto fuera un cribador y no
+    un generador de señales, así que romperla al añadir cortos habría
+    invalidado justo la medición que importa.
+    """
     trades = [
         t
         for t in report.filled
@@ -897,7 +984,8 @@ def benchmark_comparison(
         if not (np.isfinite(entry) and np.isfinite(exit_)) or entry <= 0:
             continue
         strategy.append(trade.return_pct)
-        market.append(exit_ / entry - 1.0)
+        index_move = exit_ / entry - 1.0
+        market.append(-index_move if trade.is_short else index_move)
         exposed_days.update(
             pd.bdate_range(trade.entry_date, trade.exit_date)
         )

@@ -72,6 +72,30 @@ def uptrend_with_pullback() -> pd.DataFrame:
 
 
 @pytest.fixture
+def downtrend_with_rally() -> pd.DataFrame:
+    """El espejo de `uptrend_with_pullback`: lo que debe detectar el lado corto.
+
+    Se construye reflejando la misma serie (`p' = K - p`) en vez de generarla
+    aparte, para que cualquier diferencia entre lo que detecta el largo y lo
+    que detecta el corto sea del código y no del escenario.
+    """
+    rng = np.random.default_rng(7)
+    trend = 100.0 * np.cumprod(1.0 + rng.normal(0.0018, 0.006, 400))
+    pullback = trend[-1] * np.cumprod(np.full(5, 1.0 - 0.008))
+    resume = pullback[-1] * np.cumprod([1.010, 1.018])
+    bars = make_bars(np.concatenate([trend, pullback, resume]))
+    bars.iloc[-1, bars.columns.get_loc("volume")] = 12_000_000.0
+
+    level = float(bars["high"].max()) + 50.0
+    mirrored = bars.copy()
+    mirrored["open"] = level - bars["open"]
+    mirrored["close"] = level - bars["close"]
+    mirrored["high"] = level - bars["low"]
+    mirrored["low"] = level - bars["high"]
+    return mirrored
+
+
+@pytest.fixture
 def sideways() -> pd.DataFrame:
     """Mercado lateral: la estrategia NO debe generar señales aquí.
 
