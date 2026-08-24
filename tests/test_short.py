@@ -411,3 +411,54 @@ def test_un_registro_antiguo_sin_sentido_sigue_siendo_largo():
 
     señal = signal_from_record(antiguo)
     assert not señal.levels.is_short and señal.levels.is_valid
+
+
+# ── La regla de dos indicadores ──────────────────────────────────────────────
+
+def test_la_regla_de_dos_indicadores_entra_en_sobreventa(uptrend_with_pullback):
+    """EMA200 y RSI(2): tendencia de fondo alcista y precio muy estirado."""
+    from trading.config import reversion_params
+    from trading.strategy import compute_features
+
+    p = reversion_params()
+    f = compute_features(uptrend_with_pullback, p, None, has_volume=True)
+
+    assert "rsi_fast" in f
+    dispara = f["f_regime"] & f["f_pullback"]
+    # Cuando dispara, siempre por encima de la EMA200 y con el RSI(2) bajo.
+    for fecha in f.index[dispara.fillna(False)]:
+        fila = f.loc[fecha]
+        assert fila["close"] > fila["ema_slow"]
+        assert fila["rsi_fast"] < p.rsi2_entry_max
+
+
+def test_la_regla_de_dos_indicadores_se_refleja_en_corto(downtrend_with_rally):
+    from trading.config import replace, reversion_params
+    from trading.strategy import compute_features
+
+    p = replace(reversion_params(), direction="short")
+    f = compute_features(downtrend_with_rally, p, None, has_volume=True)
+
+    dispara = (f["f_regime"] & f["f_pullback"]).fillna(False)
+    for fecha in f.index[dispara]:
+        fila = f.loc[fecha]
+        assert fila["close"] < fila["ema_slow"]
+        assert fila["rsi_fast"] > 100.0 - p.rsi2_entry_max
+
+
+def test_la_salida_va_atada_a_la_entrada():
+    """El preset trae su plazo: separarlos costó 19 puntos de acierto medidos."""
+    from trading.config import reversion_backtest, reversion_params
+
+    p, bt = reversion_params(), reversion_backtest()
+    assert p.entry_rule == "rsi2"
+    assert p.target_atr_mult == 1.00      # objetivo cercano, no 3 ATR
+    assert bt.max_holding_days == 5       # días, no un mes
+    assert p.min_risk_reward == 0.0       # el suelo de 1.5 vetaría la regla
+
+
+def test_las_dos_reglas_tienen_calibraciones_distintas():
+    """Una calibración de la regla vieja no describe a la nueva."""
+    from trading.config import DEFAULT_PARAMS, reversion_params
+
+    assert DEFAULT_PARAMS.signature != reversion_params().signature

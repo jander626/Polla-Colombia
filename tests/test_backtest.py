@@ -296,7 +296,9 @@ def test_end_to_end_backtest_produces_trades_and_warnings(uptrend_with_pullback)
     )
 
     assert report.signals_generated > 0
-    assert len(report.trades) == report.signals_generated
+    # Ya no es igualdad: una señal sobre un instrumento que todavía tiene
+    # posición abierta no se simula, porque en vivo tampoco se enviaría.
+    assert 0 < len(report.trades) <= report.signals_generated
     assert any("Sesgo de supervivencia" in note for note in report.notes)
     assert "Resultado del backtest" in report.summary() or report.filled == []
 
@@ -697,3 +699,47 @@ def test_too_few_trades_to_compare_returns_nothing():
 
     assert benchmark_comparison(_traded([0.01] * 5), _spy(0.001)) is None
     assert "insuficiente" in format_benchmark(None)
+
+
+def test_no_se_simula_una_senal_sobre_una_posicion_ya_abierta():
+    """El backtest tiene que describir lo que el usuario podría haber hecho.
+
+    En vivo, `_prepare_delivery` no envía una señal sobre un instrumento que
+    ya tiene posición abierta. El backtest las simulaba todas, así que una
+    sobreventa que dura tres sesiones contaba como tres operaciones —las dos
+    últimas entrando más caro— que nadie habría podido tomar. Medía peor que
+    la realidad, y en contra de las reglas que disparan en racha.
+    """
+    from trading.backtest import simulate_sequence
+    from trading.risk import Levels
+
+    df = pd.DataFrame(
+        {
+            "open": [99.0, 99.0, 100.0, 100.0, 100.0, 100.0],
+            "high": [100.0, 101.0, 101.0, 101.0, 101.0, 116.0],
+            "low": [98.0, 98.0, 99.0, 99.0, 99.0, 99.0],
+            "close": [99.0, 100.0, 100.0, 100.0, 100.0, 115.5],
+            "volume": [1e6] * 6,
+        },
+        index=pd.bdate_range("2024-01-01", periods=6),
+    )
+    niveles = Levels(100.0, 95.0, 115.0, 3.0, 5.0, 15.0)
+
+    def señal(pos):
+        return Signal(
+            symbol="AAPL", name="Apple", asset_class="stock",
+            bar_date=df.index[pos], close=99.0, atr=5.0, atr_pct=0.05,
+            score=72.0, levels=niveles,
+        )
+
+    # Tres señales seguidas sobre el mismo instrumento.
+    seguidas = [señal(0), señal(1), señal(2)]
+    bt = replace(DEFAULT_BACKTEST, round_trip_cost=0.0)
+
+    con_regla = simulate_sequence(seguidas, df, bt)
+    sin_regla = simulate_sequence(
+        seguidas, df, replace(bt, one_position_per_symbol=False)
+    )
+
+    assert len(con_regla) == 1, "solo la primera es tomable"
+    assert len(sin_regla) == 3, "sin la regla se cuentan las tres"

@@ -110,6 +110,8 @@ def compute_features(
     out["ema_mid"] = ind.ema(close, params.ema_mid)
     out["ema_slow"] = ind.ema(close, params.ema_slow)
     out["rsi"] = ind.rsi(close, params.rsi_period)
+    # RSI de dos sesiones: el único indicador extra que pide la regla "rsi2".
+    out["rsi_fast"] = ind.rsi(close, params.rsi_fast_period)
     out["atr"] = ind.atr(high, low, close, params.atr_period)
     out["atr_pct"] = out["atr"] / close.replace(0.0, np.nan)
 
@@ -235,6 +237,9 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
         out["atr_pct"] <= params.max_atr_pct
     )
 
+    if params.entry_rule == "rsi2":
+        _reglas_rsi2(out, params, short)
+
     if params.use_market_regime_filter:
         out["f_market"] = out["market_ok"].astype(bool)
     else:
@@ -249,6 +254,32 @@ def _add_filters(out: pd.DataFrame, params: StrategyParams, has_volume: bool) ->
         & out["f_liquidity"].fillna(False)
         & out["f_volatility"].fillna(False)
     )
+
+
+def _reglas_rsi2(out: pd.DataFrame, params: StrategyParams, short: bool) -> None:
+    """La regla de dos indicadores: tendencia de fondo + sobreventa extrema.
+
+    Reemplaza el retroceso, la reanudación y la fuerza de tendencia por una
+    sola condición. Los filtros de liquidez y volatilidad se conservan: no
+    predicen nada, son restricciones de lo que se puede operar de verdad.
+
+    Sustituye tres filtros por uno a propósito. Cada filtro extra es un
+    parámetro más que ajustar, y la medición no encontró que los tres juntos
+    ordenaran mejor que este solo.
+    """
+    close, rapido = out["close"], out["rsi_fast"]
+
+    if short:
+        out["f_regime"] = close < out["ema_slow"]
+        out["f_pullback"] = rapido > (100.0 - params.rsi2_entry_max)
+    else:
+        out["f_regime"] = close > out["ema_slow"]
+        out["f_pullback"] = rapido < params.rsi2_entry_max
+
+    # Las otras dos etapas del embudo dejan de filtrar, pero se conservan como
+    # columnas para que el embudo y los tests sigan hablando el mismo idioma.
+    out["f_trend_strength"] = True
+    out["f_resume"] = True
 
 
 def _add_score(
@@ -360,6 +391,16 @@ def _add_score(
         weight_sum += weight * available
 
     out["score"] = 100.0 * (total / weight_sum.replace(0.0, np.nan))
+
+    if params.entry_rule == "rsi2":
+        # Con dos indicadores no hay siete componentes que ponderar. Se ordena
+        # por profundidad de la sobreventa —lo más estirado primero— y nada
+        # más. Ese orden NO está demostrado: sirve para elegir cuáles caben en
+        # el mensaje cuando hay más candidatos que hueco, no para prometer que
+        # los primeros son mejores.
+        rapido = out["rsi_fast"]
+        crudo = (100.0 - rapido) if params.is_short else rapido
+        out["score"] = 100.0 * _clip01(1.0 - crudo / 50.0)
 
 
 # ── Construcción de señales ───────────────────────────────────────────────────

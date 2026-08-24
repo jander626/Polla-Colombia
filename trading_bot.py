@@ -53,6 +53,8 @@ from trading.config import (
     STATE_FILE,
     StrategyParams,
     replace,
+    reversion_backtest,
+    reversion_params,
     search_grid,
     variants,
 )
@@ -70,6 +72,18 @@ def _directions(args: argparse.Namespace) -> tuple[str, ...]:
     """Sentidos pedidos en la línea de comandos."""
     choice = getattr(args, "direction", "long")
     return ("long", "short") if choice == "both" else (choice,)
+
+
+def _rule_params(args: argparse.Namespace) -> tuple[StrategyParams, "object"]:
+    """Estrategia y plazo que pide la línea de comandos.
+
+    Las dos van juntas y no por separado porque la salida es parte de la
+    hipótesis: la entrada por reversión con la salida de tendencia mide 19
+    puntos de acierto menos que con la suya.
+    """
+    if getattr(args, "regla", "retroceso") == "reversion":
+        return reversion_params(), reversion_backtest()
+    return DEFAULT_PARAMS, DEFAULT_BACKTEST
 
 
 # ── Datos ─────────────────────────────────────────────────────────────────────
@@ -230,7 +244,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return 0
         print(f"[INFO] Escaneando: {reason}")
 
-    params = replace(DEFAULT_PARAMS, direction=directions[0])
+    base, _ = _rule_params(args)
+    params = replace(base, direction=directions[0])
     instruments = list(universe.ALL_INSTRUMENTS)
     bars, benchmark = _load_bars(instruments, params.min_bars + 60, args.offline)
     if not bars:
@@ -245,7 +260,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     signals: list[Signal] = []
     funnel = None
     for direction in directions:
-        side = replace(DEFAULT_PARAMS, direction=direction)
+        side = replace(base, direction=direction)
         found, side_funnel = scan_with_funnel(liquid, bars, side, benchmark)
         if len(directions) > 1:
             print(f"[INFO] Embudo del escaneo ({direction}):")
@@ -513,7 +528,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
 def cmd_backtest(args: argparse.Namespace) -> int:
     directions = _directions(args)
-    params = replace(DEFAULT_PARAMS, direction=directions[0])
+    base, bt_base = _rule_params(args)
+    params = replace(base, direction=directions[0])
     bars_needed = args.years * TRADING_DAYS_PER_YEAR + params.min_bars
     instruments = list(universe.ALL_INSTRUMENTS)
 
@@ -566,7 +582,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         )
         return 0
 
-    report = run_backtest(tradable, bars, params, DEFAULT_BACKTEST, benchmark)
+    report = run_backtest(tradable, bars, params, bt_base, benchmark)
     print()
     print(report.summary())
 
@@ -646,6 +662,15 @@ def main() -> int:
             p.add_argument("--dry-run", action="store_true", help="No envía nada")
         return p
 
+    def with_rule(p):
+        p.add_argument(
+            "--regla",
+            choices=("retroceso", "reversion"),
+            default="retroceso",
+            help="Regla de entrada (por defecto: la de seis filtros)",
+        )
+        return p
+
     def with_direction(p):
         p.add_argument(
             "--direction",
@@ -655,12 +680,12 @@ def main() -> int:
         )
         return p
 
-    p = with_direction(common(sub.add_parser("auto", help="Modo del cron")))
+    p = with_rule(with_direction(common(sub.add_parser("auto", help="Modo del cron"))))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_auto)
 
-    p = with_direction(common(sub.add_parser("scan", help="Escaneo del día")))
+    p = with_rule(with_direction(common(sub.add_parser("scan", help="Escaneo del día"))))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_scan)
@@ -673,7 +698,7 @@ def main() -> int:
     )
     sub.add_parser("test", help="Mensaje de prueba").set_defaults(func=cmd_test)
 
-    p = with_direction(sub.add_parser("backtest", help="Mide la ventaja y calibra"))
+    p = with_rule(with_direction(sub.add_parser("backtest", help="Mide la ventaja y calibra")))
     p.add_argument("--years", type=int, default=DEFAULT_BACKTEST.years)
     p.add_argument("--write", action="store_true", help="Guarda calibration.json")
     p.add_argument("--offline", action="store_true", help="Usa solo la caché")
@@ -695,7 +720,7 @@ def main() -> int:
     for flag, default in (
         ("offline", False), ("dry_run", False), ("force", False),
         ("no_llm", False), ("compare", False), ("search", False),
-        ("direction", "long"),
+        ("direction", "long"), ("regla", "retroceso"),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)

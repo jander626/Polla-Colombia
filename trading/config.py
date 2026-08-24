@@ -106,6 +106,26 @@ class StrategyParams:
     evita que un barrido de parámetros contamine al siguiente.
     """
 
+    # Qué dispara la entrada. Dos reglas, no una rejilla:
+    #
+    #   "retroceso" — la de siempre: seis filtros encadenados.
+    #   "rsi2"      — dos indicadores, EMA200 y RSI(2). Medida el 24 de agosto
+    #                 de 2026 contra cinco alternativas declaradas de antemano
+    #                 y sobre instrumentos Y fechas reservados; salió la mejor
+    #                 de las seis y la única positiva en el cuadrante que no
+    #                 compartía nada. Ver MEDICION_ESTRATEGIA.md.
+    #
+    # Sigue SIN demostrar ventaja: su límite inferior es negativo. Es la mejor
+    # candidata disponible, que no es lo mismo.
+    entry_rule: str = "retroceso"
+
+    # Umbrales de la regla "rsi2". El exceso medido es positivo en TODO el
+    # rango 5-25 del umbral y 100-250 de la media, así que no es un filo de
+    # cuchillo; se dejan los valores centrales y no los mejores, que es lo
+    # que evita que la elección misma sea el sobreajuste.
+    rsi_fast_period: int = 2
+    rsi2_entry_max: float = 10.0
+
     # Sentido de la operación: "long" o "short".
     #
     # No es una estrategia distinta sino la misma reflejada: retroceso dentro
@@ -237,6 +257,7 @@ class StrategyParams:
         backtest de ESTA estrategia, o no significa nada.
         """
         parts = [
+            f"rule={self.entry_rule}:{self.rsi2_entry_max}",
             f"dir={self.direction}",
             f"w={sorted(self.weights)}",
             f"regime={self.use_market_regime_filter}:{self.market_regime_ma}",
@@ -320,6 +341,35 @@ SEARCH_WEIGHTS: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = (
     ("predictivo", PREDICTIVE_WEIGHTS),
     ("momentum", MOMENTUM_ONLY_WEIGHTS),
 )
+
+
+# ── Presets de estrategia ────────────────────────────────────────────────────
+
+def reversion_params() -> "StrategyParams":
+    """La regla de dos indicadores, con la salida que comparte su tesis.
+
+    La entrada dice "el precio se pasó y volverá a su sitio". Eso tiene un
+    horizonte de días y un objetivo cercano, no un movimiento de 3 ATR a 30
+    días. Emparejarla con la salida de tendencia no es un ajuste subóptimo:
+    son dos tesis distintas pegadas una detrás de otra, y medido cuesta 19
+    puntos de acierto (24% contra 43%).
+
+    `min_risk_reward` se pone a cero a propósito: con un objetivo de 1 ATR y
+    un stop de ~0.8 ATR, el suelo de 1.5 vetaría la estrategia entera. El
+    filtro existía para descartar retrocesos demasiado profundos, que es un
+    problema de la OTRA regla.
+    """
+    return replace(
+        StrategyParams(),
+        entry_rule="rsi2",
+        target_atr_mult=1.00,
+        min_risk_reward=0.0,
+    )
+
+
+def reversion_backtest() -> "BacktestParams":
+    """El plazo corto que le corresponde a la entrada por reversión."""
+    return replace(DEFAULT_BACKTEST, max_holding_days=5)
 
 
 def search_grid(directions: tuple[str, ...] = ("long",)) -> dict[str, "StrategyParams"]:
@@ -476,6 +526,18 @@ class BacktestParams:
     # Coste de ida y vuelta como fracción del precio de entrada. Quantfury no
     # cobra comisión pero opera sobre el spread; esto lo aproxima.
     round_trip_cost: float = 0.0010
+    # Una posición por instrumento a la vez, como en vivo.
+    #
+    # No es un ajuste: es corregir una divergencia real. El escaneo en vivo NO
+    # repite señal sobre un símbolo que ya tiene posición abierta
+    # (`trading_bot._prepare_delivery`), pero el backtest sí las simulaba
+    # todas. Cualquier regla que dispare varios días seguidos —una sobreventa
+    # que dura tres sesiones— quedaba medida como tres operaciones que el
+    # usuario nunca habría podido tomar, y casi siempre peores que la primera.
+    #
+    # El invariante del proyecto es que el backtest y el escaneo en vivo
+    # describan lo mismo. Con esto en False dejan de hacerlo.
+    one_position_per_symbol: bool = True
     # Si una misma vela toca stop y objetivo, no sabemos cuál llegó primero.
     # Contarlo como pérdida sesga el backtest en contra, que es el lado
     # correcto en el que equivocarse.

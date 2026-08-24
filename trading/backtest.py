@@ -95,6 +95,38 @@ def _stop_outcome(exit_price: float, entry_price: float, short: bool = False) ->
     return "win" if exit_price > entry_price else "loss"
 
 
+def simulate_sequence(
+    signals: list[Signal], df: pd.DataFrame, bt: BacktestParams
+) -> list[Trade]:
+    """Simula las señales de UN instrumento respetando la posición abierta.
+
+    Existe porque el escaneo en vivo no repite señal sobre un símbolo que ya
+    tiene posición (`trading_bot._prepare_delivery`) y el backtest sí las
+    simulaba todas. Una sobreventa que dura tres sesiones se contaba como tres
+    operaciones que el usuario nunca habría podido tomar —y las dos últimas
+    entran más caro, así que la medida salía peor que la realidad.
+
+    Vive aquí, en una sola función, porque hay dos rutas que simulan
+    (`run_backtest` y `run_search`) y un test exige que den lo mismo. Cuando
+    la regla vivía suelta en una de las dos, ese test la cazó.
+    """
+    trades: list[Trade] = []
+    libre_desde: Optional[pd.Timestamp] = None
+
+    for signal in signals:
+        if (
+            bt.one_position_per_symbol
+            and libre_desde is not None
+            and signal.bar_date < libre_desde
+        ):
+            continue
+        trade = simulate_signal(signal, df, bt)
+        trades.append(trade)
+        if trade.exit_date is not None:
+            libre_desde = trade.exit_date
+    return trades
+
+
 def simulate_signal(
     signal: Signal,
     df: pd.DataFrame,
@@ -582,8 +614,7 @@ def run_backtest(
             continue
 
         report.signals_generated += len(signals)
-        for signal in signals:
-            report.trades.append(simulate_signal(signal, df, bt))
+        report.trades.extend(simulate_sequence(signals, df, bt))
 
     report.notes.append(
         "Sesgo de supervivencia: el universo son los instrumentos líquidos de hoy, "
@@ -745,7 +776,9 @@ def run_search(
         print(f"[INFO] ({position}/{len(grid)}) {label}…")
 
         generated = 0
-        pending: list[tuple[Signal, pd.DataFrame]] = []
+        # Por instrumento, no una lista plana: `simulate_sequence` necesita
+        # ver las señales de un mismo símbolo juntas y en orden.
+        pending: list[tuple[list[Signal], pd.DataFrame]] = []
         for instrument in instruments:
             df = bars.get(instrument.symbol)
             if df is None or len(df) < params.min_bars:
@@ -760,13 +793,17 @@ def run_search(
                 print(f"[WARN] {instrument.symbol}: {exc}")
                 continue
             generated += len(signals)
-            pending.extend((signal, df) for signal in signals)
+            if signals:
+                pending.append((signals, df))
 
         for trail in trails:
             bt = replace(base_bt, trail_atr_mult=trail)
             report = BacktestReport()
             report.signals_generated = generated
-            report.trades = [simulate_signal(s, df, bt) for s, df in pending]
+            report.trades = [
+                t for signals, df in pending
+                for t in simulate_sequence(signals, df, bt)
+            ]
 
             head = report.headline()
             train_ops, train_lower, test_ops, test_avg, test_lower = _half_metrics(
