@@ -106,6 +106,17 @@ class StrategyParams:
     evita que un barrido de parámetros contamine al siguiente.
     """
 
+    # Sentido de la operación: "long" o "short".
+    #
+    # No es una estrategia distinta sino la misma reflejada: retroceso dentro
+    # de una tendencia, entrando cuando reanuda. En corto la tendencia es
+    # bajista, el "retroceso" es un rebote y la reanudación es la vuelta a
+    # caer. Vive en los parámetros —y no como argumento suelto— para que el
+    # backtest pueda barrer sentidos igual que barre cualquier otro umbral, y
+    # para que entre en `signature` (una calibración de largos no describe
+    # cortos).
+    direction: str = "long"
+
     # Filtro 1 — régimen alcista
     ema_fast: int = 20
     ema_mid: int = 50
@@ -204,6 +215,10 @@ class StrategyParams:
     # Barras mínimas de historia para que los indicadores sean fiables. El
     # momentum a 12 meses es ahora el indicador más exigente en historia.
     @property
+    def is_short(self) -> bool:
+        return self.direction == "short"
+
+    @property
     def min_bars(self) -> int:
         return max(self.ema_slow, self.momentum_window + self.momentum_skip) + 60
 
@@ -222,6 +237,7 @@ class StrategyParams:
         backtest de ESTA estrategia, o no significa nada.
         """
         parts = [
+            f"dir={self.direction}",
             f"w={sorted(self.weights)}",
             f"regime={self.use_market_regime_filter}:{self.market_regime_ma}",
             f"adx={self.adx_min}",
@@ -306,27 +322,40 @@ SEARCH_WEIGHTS: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = (
 )
 
 
-def search_grid() -> dict[str, "StrategyParams"]:
-    """Las 27 combinaciones de estrategia que barre `backtest --search`.
+def search_grid(directions: tuple[str, ...] = ("long",)) -> dict[str, "StrategyParams"]:
+    """Las 27 combinaciones de estrategia (por sentido) que barre `--search`.
 
     El umbral de reanudación va SIEMPRE atado al de retroceso. Si el RSI "cae
     por debajo de 55" y basta con "estar por encima de 45" para darlo por
     reanudado, un RSI plano en 50 cumpliría las dos condiciones a la vez y la
     búsqueda encontraría "ventaja" en un filtro que no filtra nada.
+
+    `directions` multiplica la rejilla, no la reemplaza. Barrer los dos
+    sentidos son 54 combinaciones × 3 salidas = 162 mediciones, y **cuantas
+    más se prueban, más fácil es que una parezca buena por azar**: con 162
+    intentos, ver una con `p < 0.01` no dice nada por sí solo. Por eso
+    `run_search` parte la muestra y ordena por validación, y por eso el
+    veredicto lo da el límite inferior en validación y nunca la media en
+    entrenamiento. El barrido anterior ya devolvió 0 de 81; el número de
+    intentos es justamente lo que hace que ese 0 no sea sorprendente.
     """
-    base = StrategyParams()
     grid: dict[str, StrategyParams] = {}
-    for rsi in SEARCH_PULLBACK_RSI:
-        for weight_name, weights in SEARCH_WEIGHTS:
-            for adx in SEARCH_ADX_MIN:
-                label = f"rsi{rsi:.0f}·{weight_name}·adx{adx:.0f}"
-                grid[label] = replace(
-                    base,
-                    pullback_rsi_max=rsi,
-                    resume_rsi_min=rsi,
-                    adx_min=adx,
-                    weights=weights,
-                )
+    for direction in directions:
+        base = StrategyParams(direction=direction)
+        # Solo se etiqueta el sentido cuando hay más de uno, para no cambiar
+        # las etiquetas de los barridos largos ya publicados.
+        prefix = f"{direction}·" if len(directions) > 1 else ""
+        for rsi in SEARCH_PULLBACK_RSI:
+            for weight_name, weights in SEARCH_WEIGHTS:
+                for adx in SEARCH_ADX_MIN:
+                    label = f"{prefix}rsi{rsi:.0f}·{weight_name}·adx{adx:.0f}"
+                    grid[label] = replace(
+                        base,
+                        pullback_rsi_max=rsi,
+                        resume_rsi_min=rsi,
+                        adx_min=adx,
+                        weights=weights,
+                    )
     return grid
 
 

@@ -66,6 +66,12 @@ from trading.universe import BENCHMARK_SYMBOL, Instrument
 TRADING_DAYS_PER_YEAR = 252
 
 
+def _directions(args: argparse.Namespace) -> tuple[str, ...]:
+    """Sentidos pedidos en la línea de comandos."""
+    choice = getattr(args, "direction", "long")
+    return ("long", "short") if choice == "both" else (choice,)
+
+
 # ── Datos ─────────────────────────────────────────────────────────────────────
 
 def _load_bars(
@@ -208,7 +214,12 @@ def _send_delivery(
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    params = DEFAULT_PARAMS
+    # El sentido por defecto es solo largos, y no por conservadurismo: los
+    # cortos todavía no tienen ninguna medición detrás. Activarlos en vivo
+    # antes de medirlos sería repetir el error del porcentaje de confianza —
+    # publicar como operable algo cuya ventaja nadie ha comprobado— y esta vez
+    # con la deriva del mercado en contra. Se habilitan con --direction.
+    directions = _directions(args)
     state = TradingState.load(STATE_FILE)
     client = notify.TelegramClient()
 
@@ -219,6 +230,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return 0
         print(f"[INFO] Escaneando: {reason}")
 
+    params = replace(DEFAULT_PARAMS, direction=directions[0])
     instruments = list(universe.ALL_INSTRUMENTS)
     bars, benchmark = _load_bars(instruments, params.min_bars + 60, args.offline)
     if not bars:
@@ -230,9 +242,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
     print(f"[INFO] Superan el filtro de liquidez: {len(liquid)}/{len(bars)}")
 
-    signals, funnel = scan_with_funnel(liquid, bars, params, benchmark)
-    print("[INFO] Embudo del escaneo:")
-    print(funnel.summary())
+    signals: list[Signal] = []
+    funnel = None
+    for direction in directions:
+        side = replace(DEFAULT_PARAMS, direction=direction)
+        found, side_funnel = scan_with_funnel(liquid, bars, side, benchmark)
+        if len(directions) > 1:
+            print(f"[INFO] Embudo del escaneo ({direction}):")
+        else:
+            print("[INFO] Embudo del escaneo:")
+        print(side_funnel.summary())
+        signals += found
+        funnel = funnel or side_funnel
 
     calibration = Calibration.load(CALIBRATION_FILE)
     stale = calibration.is_calibrated and not calibration.matches(params)
@@ -491,7 +512,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
 # ── Backtest ──────────────────────────────────────────────────────────────────
 
 def cmd_backtest(args: argparse.Namespace) -> int:
-    params = DEFAULT_PARAMS
+    directions = _directions(args)
+    params = replace(DEFAULT_PARAMS, direction=directions[0])
     bars_needed = args.years * TRADING_DAYS_PER_YEAR + params.min_bars
     instruments = list(universe.ALL_INSTRUMENTS)
 
@@ -511,7 +533,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         # Barrido completo en una sola pasada. Es el modo que responde "qué
         # habría funcionado estos años" sin ir de variante en variante, y el
         # que hace falta cuando ya no queda una hipótesis clara que probar.
-        grid = search_grid()
+        grid = search_grid(directions)
         print(
             f"[INFO] Barriendo {len(grid)} combinaciones × {len(SEARCH_TRAILS)} "
             f"salidas = {len(grid) * len(SEARCH_TRAILS)} mediciones"
@@ -624,12 +646,21 @@ def main() -> int:
             p.add_argument("--dry-run", action="store_true", help="No envía nada")
         return p
 
-    p = common(sub.add_parser("auto", help="Modo del cron"))
+    def with_direction(p):
+        p.add_argument(
+            "--direction",
+            choices=("long", "short", "both"),
+            default="long",
+            help="Sentido de las operaciones (por defecto: solo largos)",
+        )
+        return p
+
+    p = with_direction(common(sub.add_parser("auto", help="Modo del cron")))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_auto)
 
-    p = common(sub.add_parser("scan", help="Escaneo del día"))
+    p = with_direction(common(sub.add_parser("scan", help="Escaneo del día")))
     p.add_argument("--force", action="store_true", help="Ignora la ventana horaria")
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_scan)
@@ -642,7 +673,7 @@ def main() -> int:
     )
     sub.add_parser("test", help="Mensaje de prueba").set_defaults(func=cmd_test)
 
-    p = sub.add_parser("backtest", help="Mide la ventaja y calibra")
+    p = with_direction(sub.add_parser("backtest", help="Mide la ventaja y calibra"))
     p.add_argument("--years", type=int, default=DEFAULT_BACKTEST.years)
     p.add_argument("--write", action="store_true", help="Guarda calibration.json")
     p.add_argument("--offline", action="store_true", help="Usa solo la caché")
@@ -664,6 +695,7 @@ def main() -> int:
     for flag, default in (
         ("offline", False), ("dry_run", False), ("force", False),
         ("no_llm", False), ("compare", False), ("search", False),
+        ("direction", "long"),
     ):
         if not hasattr(args, flag):
             setattr(args, flag, default)

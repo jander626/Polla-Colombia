@@ -19,9 +19,15 @@ on:
         required: false
         default: "false"
       search:
-        description: "Barrer las 81 combinaciones y ordenar por validación (true/false)"
+        description: "Barrer las combinaciones y ordenar por validación (true/false)"
         required: false
         default: "false"
+      direction:
+        description: "Sentido: long, short o both"
+        required: false
+        default: "long"
+        type: choice
+        options: ["long", "short", "both"]
 
 permissions:
   contents: write  # para commitear calibration.json
@@ -65,9 +71,10 @@ jobs:
           WRITE: ${{ github.event.inputs.write || 'true' }}
           COMPARE: ${{ github.event.inputs.compare || 'false' }}
           SEARCH: ${{ github.event.inputs.search || 'false' }}
+          DIRECTION: ${{ github.event.inputs.direction || 'long' }}
         run: |
           set -o pipefail
-          args=(backtest --years "$YEARS")
+          args=(backtest --years "$YEARS" --direction "$DIRECTION")
           # El barrido y la comparación solo miden: escribir la calibración
           # desde cualquiera de los dos guardaría números de una estrategia que
           # no es la que corre en vivo.
@@ -75,7 +82,11 @@ jobs:
             args+=(--search)
           elif [ "$COMPARE" = "true" ]; then
             args+=(--compare)
-          elif [ "$WRITE" != "false" ]; then
+          elif [ "$WRITE" != "false" ] && [ "$DIRECTION" = "long" ]; then
+            # La calibración solo se escribe para largos: es la estrategia que
+            # corre en vivo. Guardar la de cortos sobrescribiría la tabla que
+            # usan las alertas con números de otra estrategia — el fallo que
+            # `signature` existe para detectar, y que no hay que provocar.
             args+=(--write)
           fi
           python trading_bot.py "${args[@]}" 2>&1 | tee backtest_output.txt

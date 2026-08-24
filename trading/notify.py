@@ -211,15 +211,23 @@ def _filters_passed(signal: Signal) -> list[str]:
     puede juzgar el candidato ni descartarlo con criterio propio, que es
     justo lo que un cribador tiene que permitirle hacer.
     """
-    lines = ["✓ En tendencia alcista (cierre sobre la EMA200, EMA50 sobre EMA200)"]
+    short = signal.levels.is_short
+    if short:
+        lines = ["✓ En tendencia bajista (cierre bajo la EMA200, EMA50 bajo EMA200)"]
+    else:
+        lines = ["✓ En tendencia alcista (cierre sobre la EMA200, EMA50 sobre EMA200)"]
     if signal.adx == signal.adx:                      # descarta NaN
         lines.append(f"✓ Con fuerza de tendencia (ADX {signal.adx:.0f})")
     if signal.pullback_rsi == signal.pullback_rsi:
+        verbo = "Rebotó" if short else "Retrocedió"
+        hacia = "subió" if short else "bajó"
         lines.append(
-            f"✓ Retrocedió a la zona de la EMA20 (el RSI bajó a {signal.pullback_rsi:.0f})"
+            f"✓ {verbo} a la zona de la EMA20 (el RSI {hacia} a "
+            f"{signal.pullback_rsi:.0f})"
         )
     if signal.rsi == signal.rsi:
-        lines.append(f"✓ Está reanudando (RSI {signal.rsi:.0f} y subiendo)")
+        rumbo = "y bajando" if short else "y subiendo"
+        lines.append(f"✓ Está reanudando (RSI {signal.rsi:.0f} {rumbo})")
     lines.append(f"✓ Volatilidad en rango (ATR {100 * signal.atr_pct:.1f}% del precio)")
     return lines
 
@@ -240,14 +248,24 @@ def format_signal(
     instrument = get_instrument(signal.symbol)
     levels = signal.levels
     kind = "PAR" if signal.is_forex else "ACCIÓN"
+    short = levels.is_short
+
+    # El sentido va en la cabecera y no en una línea perdida abajo: confundir
+    # una venta con una compra es el peor error que puede cometer quien lee
+    # esto con el móvil en la mano y el mercado a punto de abrir.
+    encabezado = f"🔻 *{signal.symbol}* — {instrument.name}" if short else (
+        f"🔎 *{signal.symbol}* — {instrument.name}"
+    )
+    etiqueta = f"_{kind} · CORTO (vender)_" if short else f"_{kind}_"
+    entrada = "desde" if short else "hasta"
 
     lines = [
-        f"🔎 *{signal.symbol}* — {instrument.name}",
-        f"_{kind}_",
+        encabezado,
+        etiqueta,
         "",
         *_filters_passed(signal),
         "",
-        f"📥 Zona de entrada: hasta *{_fmt(levels.entry_max, instrument)}*",
+        f"📥 Zona de entrada: {entrada} *{_fmt(levels.entry_max, instrument)}*",
         f"🛑 Stop estructural: *{_fmt(levels.stop, instrument)}*",
         f"🎯 Objetivo (3 ATR): *{_fmt(levels.target, instrument)}*",
         f"⚖️ Riesgo/beneficio: *1:{levels.risk_reward:.2f}*",

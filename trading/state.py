@@ -128,6 +128,9 @@ class TradingState:
         record = {
             "symbol": signal.symbol,
             "asset_class": signal.asset_class,
+            # Sin esto, un corto guardado se releería como largo y su stop
+            # quedaría del lado equivocado al resolverlo.
+            "direction": signal.levels.direction,
             "signal_date": signal.bar_date.strftime("%Y-%m-%d"),
             "alerted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "score": round(signal.score, 2),
@@ -165,20 +168,30 @@ class TradingState:
             return ManualUpdate(False, "not_open")
         if not _is_price(price):
             return ManualUpdate(False, "bad_price")
-        if price <= record["stop"]:
-            # Entrar por debajo del stop no describe ninguna operación viva:
+        pasado_el_stop = (
+            price >= record["stop"] if _is_short(record) else price <= record["stop"]
+        )
+        if pasado_el_stop:
+            # Entrar ya pasado el stop no describe ninguna operación viva:
             # habría nacido cerrada. Es un dedazo con casi total seguridad, y
-            # aceptarlo en silencio envenenaría la única medición real.
+            # aceptarlo en silencio envenenaría la única medición real. En
+            # corto el lado peligroso es el de arriba.
             return ManualUpdate(False, "below_stop", record)
 
         record["taken"] = True
         record["real_entry_price"] = float(price)
         record["real_entry_date"] = (day or _today()).isoformat()
 
-        # Comprar por encima del techo de la zona no se rechaza —es un hecho,
-        # no una propuesta—, pero cambia el seguimiento: el simulador nunca
-        # habría ejecutado esa orden, así que no sabrá cerrarla solo.
-        warning = "outside_zone" if price > record["entry_max"] else ""
+        # Entrar fuera del límite de la zona no se rechaza —es un hecho, no una
+        # propuesta—, pero cambia el seguimiento: el simulador nunca habría
+        # ejecutado esa orden, así que no sabrá cerrarla solo. En largo eso es
+        # comprar por encima del techo; en corto, vender por debajo del suelo.
+        fuera = (
+            price < record["entry_max"]
+            if _is_short(record)
+            else price > record["entry_max"]
+        )
+        warning = "outside_zone" if fuera else ""
         return ManualUpdate(True, "taken", record, warning)
 
     def mark_skipped(self, symbol: str) -> ManualUpdate:
@@ -231,8 +244,9 @@ class TradingState:
 
         entry = float(entry)
         exit_price = float(exit_price)
-        planned_risk = record["entry_max"] - record["stop"]
-        net_return = (exit_price - entry) / entry - bt.round_trip_cost
+        planned_risk = _planned_risk(record)
+        move = _move(record, entry, exit_price)
+        net_return = move / entry - bt.round_trip_cost
 
         finished = dict(record)
         finished.update(
@@ -243,9 +257,7 @@ class TradingState:
                 "exit_price": exit_price,
                 "entry_date": record.get("real_entry_date"),
                 "exit_date": (day or _today()).isoformat(),
-                "r_multiple": _clean((exit_price - entry) / planned_risk)
-                if planned_risk > 0
-                else None,
+                "r_multiple": _clean(move / planned_risk) if planned_risk > 0 else None,
                 "return_pct": _clean(net_return),
                 "is_win": net_return > 0,
                 "note": "Cerrada a mano por el usuario con /cerrar.",
@@ -367,6 +379,27 @@ def _expired(history: list[dict]) -> int:
     return sum(1 for h in history if h.get("status") == "expired")
 
 
+def _direction(record: dict) -> str:
+    """Sentido del registro. Los guardados antes de existir cortos son largos."""
+    return str(record.get("direction", "long"))
+
+
+def _is_short(record: dict) -> bool:
+    return _direction(record) == "short"
+
+
+def _planned_risk(record: dict) -> float:
+    """Riesgo planificado, siempre positivo: la distancia entrada-stop."""
+    if _is_short(record):
+        return record["stop"] - record["entry_max"]
+    return record["entry_max"] - record["stop"]
+
+
+def _move(record: dict, entry: float, exit_price: float) -> float:
+    """Movimiento a favor, con el signo que le toque al sentido."""
+    return (entry - exit_price) if _is_short(record) else (exit_price - entry)
+
+
 def _not_taken(history: list[dict]) -> int:
     return sum(1 for h in history if h.get("status") == "not_taken")
 
@@ -415,16 +448,15 @@ def _apply_real_entry(record: dict, bt: BacktestParams) -> None:
         return
 
     entry, exit_price = float(entry), float(exit_price)
-    planned_risk = record["entry_max"] - record["stop"]
-    net_return = (exit_price - entry) / entry - bt.round_trip_cost
+    planned_risk = _planned_risk(record)
+    move = _move(record, entry, exit_price)
+    net_return = move / entry - bt.round_trip_cost
 
     record["simulated_entry_price"] = record.get("entry_price")
     record["entry_price"] = entry
     if record.get("real_entry_date"):
         record["entry_date"] = record["real_entry_date"]
-    record["r_multiple"] = (
-        _clean((exit_price - entry) / planned_risk) if planned_risk > 0 else None
-    )
+    record["r_multiple"] = _clean(move / planned_risk) if planned_risk > 0 else None
     record["return_pct"] = _clean(net_return)
     record["is_win"] = net_return > 0
 
@@ -432,7 +464,10 @@ def _apply_real_entry(record: dict, bt: BacktestParams) -> None:
 def signal_from_record(record: dict) -> Signal:
     """Reconstruye la señal guardada para poder simularla."""
     entry, stop, target = record["entry_max"], record["stop"], record["target"]
-    risk, reward = entry - stop, target - entry
+    if _is_short(record):
+        risk, reward = stop - entry, entry - target
+    else:
+        risk, reward = entry - stop, target - entry
 
     levels = Levels(
         entry_max=entry,
@@ -441,6 +476,7 @@ def signal_from_record(record: dict) -> Signal:
         risk_reward=reward / risk if risk else 0.0,
         risk_per_unit=risk,
         reward_per_unit=reward,
+        direction=_direction(record),
     )
     instrument = get_instrument(record["symbol"])
     return Signal(

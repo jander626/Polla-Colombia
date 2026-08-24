@@ -117,6 +117,61 @@ Cuatro reglas de ese código que no son adorno:
 como "candidatos que dejaste pasar", que es el número que impide leer el
 rendimiento como si describiera lo que hizo el usuario.
 
+## Cortos: motor listo, sin medir
+
+El 24 de agosto de 2026 se añadió el lado corto (`StrategyParams.direction`).
+**No es una estrategia nueva: es la misma reflejada** — tendencia bajista,
+rebote, y vuelta a caer. Está escrito así a propósito; dos cuerpos de reglas
+independientes se habrían desincronizado a la primera.
+
+**Nada de esto se ha medido todavía.** No hay datos de mercado en el sandbox y
+el conector de IBKR pide autenticación que una sesión no interactiva no puede
+dar. Por eso `--direction` existe pero el valor por defecto es `long` en vivo:
+activar cortos sin medición sería repetir el error del porcentaje de
+confianza, y esta vez con la deriva del mercado en contra.
+
+Lo que protege el reflejo:
+
+- **La propiedad del espejo.** `tests/test_short.py` refleja series de precios
+  enteras (`p' = K - p`) y exige que largo y corto den el MISMO desenlace y la
+  MISMA R al decimal, en siete escenarios (huecos, vela ambigua, caducidad,
+  salida por tiempo) y con trailing. Un solo `<` sin girar rompe esa igualdad.
+- **El nulo lleva el sentido de la operación.** En `benchmark_comparison`, el
+  nulo de un corto es VENDER el índice, no comprarlo. Comparar un corto contra
+  comprar el índice mediría el signo del mercado, no la selección — y habría
+  invalidado justo la medición que convirtió esto en un cribador.
+- **La calibración no se mezcla.** `direction` entra en `signature`, y el
+  workflow solo escribe `calibration.json` cuando `direction=long`.
+- **Los registros antiguos siguen siendo largos.** `direction` se lee con
+  default `"long"`, así que nada de lo ya guardado cambia de sentido.
+
+Lo que hay que saber antes de creerse un backtest de cortos:
+
+- **El régimen invertido deja pocos días operables.** El S&P pasa la mayor
+  parte del tiempo sobre su media de 200, así que los cortos salen agrupados
+  en dos o tres episodios. Operaciones agrupadas no son independientes, y el
+  error estándar de `benchmark_comparison` (`excess.std()/sqrt(n)`) las trata
+  como si lo fueran: el límite inferior saldrá **demasiado optimista**. Hay
+  que descontarlo a ojo o corregirlo antes de decidir nada.
+- **El coste de mantener un corto no está modelado.** El único coste es
+  `round_trip_cost = 0.0010`. Lo que Quantfury cobre por noche —y el modelo
+  aguanta 30 días— no está ahí. Averiguarlo antes de leer resultados.
+- **El sesgo de supervivencia cambia de lado.** El universo son los líquidos
+  de hoy: en corto eso es vender una cesta de supervivientes, y los desastres
+  no están. Juega a FAVOR de los cortos, al revés que en largo.
+- **Barrer los dos sentidos son 162 mediciones.** Cuantos más intentos, más
+  fácil que uno parezca bueno por azar. El veredicto lo da el límite inferior
+  en validación, nunca la media en entrenamiento.
+
+Cómo medirlo cuando haya datos:
+
+```
+python trading_bot.py backtest --direction short --years 5
+python trading_bot.py backtest --direction both --search   # 162 mediciones
+```
+
+O el workflow `Backtest y calibración` con el input `direction`.
+
 ## Cómo se trabaja
 
 - Rama de desarrollo: `claude/trading-bot-telegram-alerts-0l55mu`. Se abre PR y
