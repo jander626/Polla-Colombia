@@ -115,6 +115,39 @@ def sanitize(text: str) -> str:
     return text.replace("**", "*").replace("__", "_").replace("`", "'").strip()
 
 
+def parse_price(text: str) -> Optional[float]:
+    """Lee un precio tecleado en el móvil. None si no hay número utilizable.
+
+    El usuario escribe desde Colombia, donde el separador decimal es la coma,
+    y el teclado del móvil cuela espacios y símbolos de moneda sin esfuerzo.
+    Rechazar "266,5" por eso le devolvería a editar `trading_state.json` a
+    mano, que es exactamente lo que estos comandos vienen a quitar de en medio.
+    """
+    cleaned = text.strip().replace("$", "").replace(" ", "").replace("\u00a0", "")
+    if not cleaned:
+        return None
+
+    if "," in cleaned and "." in cleaned:
+        # "1.234,56" o "1,234.56": manda el separador que está más a la
+        # derecha, que en ambas convenciones es el decimal.
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        # Una coma sola es decimal: "1,0850" es un par de forex, no mil.
+        cleaned = cleaned.replace(",", ".")
+
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    # Un precio no finito o negativo no es un dedazo recuperable: es basura.
+    if value != value or value in (float("inf"), float("-inf")) or value <= 0:
+        return None
+    return value
+
+
 # ── Formato de las alertas ────────────────────────────────────────────────────
 
 def _fmt(value: float, instrument: Instrument) -> str:
@@ -337,19 +370,39 @@ def format_no_signals(funnel=None) -> str:
     return "\n".join(parts)
 
 
+def outcome_label(record: dict) -> tuple[str, str]:
+    """Icono y nombre legible del desenlace de un registro del histórico.
+
+    Vive aquí y no en cada sitio que lo necesita porque el histórico ya no
+    contiene solo desenlaces del simulador: desde que existen `/cerrar` y
+    `/paso` hay registros cerrados a mano y candidatos que nadie tomó. Antes,
+    `/senales` los imprimía como "❌ F — None".
+    """
+    status = record.get("status")
+    if status == "not_taken":
+        return "🚫", "No tomada"
+    if status == "expired":
+        return "⌛", "Caducada sin ejecutarse"
+
+    outcome = record.get("outcome")
+    if outcome == "manual":
+        # El icono lo decide el resultado, que es lo que le importa al usuario;
+        # que la salida fuera manual lo dice el texto.
+        return ("✅" if record.get("is_win") else "❌"), "Cerrada a mano"
+    if outcome == "win":
+        return "✅", "Objetivo alcanzado"
+    if outcome == "loss":
+        return "❌", "Stop alcanzado"
+    return "⏳", "Cerrada por tiempo"
+
+
 def format_outcome(record: dict) -> str:
     """Aviso de cierre de una operación previamente alertada."""
     instrument = get_instrument(record["symbol"])
-    outcome = record.get("outcome")
     entry = record.get("entry_price")
     exit_price = record.get("exit_price")
 
-    if outcome == "win":
-        head, verdict = "✅", "Objetivo alcanzado"
-    elif outcome == "loss":
-        head, verdict = "❌", "Stop alcanzado"
-    else:
-        head, verdict = "⏳", "Cerrada por tiempo"
+    head, verdict = outcome_label(record)
 
     lines = [
         f"{head} *{record['symbol']} — {verdict}*",
@@ -362,6 +415,162 @@ def format_outcome(record: dict) -> str:
         lines.append(f"Resultado: *{record['return_pct'] * 100:+.2f}%*")
     if record.get("r_multiple") is not None:
         lines.append(f"En múltiplos de riesgo: *{record['r_multiple']:+.2f}R*")
+    return "\n".join(lines)
+
+
+# ── Correcciones manuales del seguimiento ────────────────────────────────────
+#
+# El usuario coloca las órdenes a mano, así que el bot solo sabe de su cuenta
+# lo que él le cuente. Estos mensajes son la mitad visible de `/tomada`,
+# `/cerrar` y `/paso`: confirman qué quedó anotado, porque una corrección que
+# no se confirma es una corrección que el usuario repetirá o dará por perdida.
+
+def format_taken(record: dict, warning: str = "") -> str:
+    """`/tomada`: confirma el precio de entrada real que queda registrado."""
+    instrument = get_instrument(record["symbol"])
+    price = record["real_entry_price"]
+
+    lines = [
+        f"📈 *{record['symbol']} — anotada como tomada*",
+        f"_{instrument.name}_",
+        "",
+        f"Entrada real: *{_fmt(price, instrument)}*",
+        f"🛑 Stop: {_fmt(record['stop'], instrument)}  ·  "
+        f"🎯 Objetivo: {_fmt(record['target'], instrument)}",
+    ]
+
+    if warning == "outside_zone":
+        lines += [
+            "",
+            f"⚠️ Entraste por encima del techo de la zona "
+            f"({_fmt(record['entry_max'], instrument)}). Queda registrado tal "
+            "cual —es lo que pasó—, pero el simulador no puede seguir una "
+            "orden que nunca habría ejecutado: cuando salgas, ciérrala tú con "
+            f"/cerrar {record['symbol']} PRECIO.",
+        ]
+    else:
+        lines += [
+            "",
+            "_A partir de ahora el resultado se medirá contra tu precio real, "
+            "no contra el techo de la zona._",
+        ]
+    return "\n".join(lines)
+
+
+def format_skipped(record: dict) -> str:
+    """`/paso`: confirma que el candidato sale del seguimiento sin contar."""
+    instrument = get_instrument(record["symbol"])
+    return "\n".join(
+        [
+            f"🚫 *{record['symbol']} — marcada como no tomada*",
+            f"_{instrument.name}_",
+            "",
+            "Sale del seguimiento. No contará ni como acierto ni como fallo: "
+            "no se arriesgó dinero en ella.",
+            "",
+            "_Si vuelve a cumplir los filtros otro día, volverá a aparecer._",
+        ]
+    )
+
+
+def format_manual_close(record: dict) -> str:
+    """`/cerrar`: el desenlace de siempre, más de dónde salen los números."""
+    return format_outcome(record) + "\n\n" + (
+        "_Calculado con el precio que me diste, no con el del plan: es lo que "
+        "de verdad pasó en tu cuenta._"
+    )
+
+
+def format_manual_usage(command: str) -> str:
+    """Cómo se escribe el comando. Se responde en vez de callar."""
+    usage = {
+        "/tomada": (
+            "📈 */tomada* — anota que entraste, y a qué precio.\n\n"
+            "Escríbelo así:\n"
+            "/tomada TXN 280.5"
+        ),
+        "/cerrar": (
+            "🔚 */cerrar* — cierra una operación al precio al que saliste.\n\n"
+            "Escríbelo así:\n"
+            "/cerrar TXN 295.4\n\n"
+            "Si nunca me dijiste a qué precio entraste, dímelo en el mismo "
+            "mensaje (primero la salida, después la entrada):\n"
+            "/cerrar TXN 295.4 280.5"
+        ),
+        "/paso": (
+            "🚫 */paso* — marca un candidato que decidiste no tomar.\n\n"
+            "Escríbelo así:\n"
+            "/paso TXN"
+        ),
+    }
+    return usage.get(command, "Comando desconocido. Usa /ayuda.")
+
+
+def format_manual_error(
+    reason: str,
+    symbol: str,
+    open_symbols: Optional[Iterable[str]] = None,
+    record: Optional[dict] = None,
+) -> str:
+    """Por qué no se pudo anotar la corrección, y qué hacer en su lugar.
+
+    Un "no se pudo" sin motivo deja al usuario sin saber si el bot le entendió
+    mal o si el estado no es el que él cree. Cada error dice las dos cosas.
+    """
+    symbol = symbol.strip().upper()
+
+    if reason == "not_open":
+        abiertas = [s for s in (open_symbols or [])]
+        cola = (
+            "Abiertas ahora: " + ", ".join(sorted(abiertas))
+            if abiertas
+            else "Ahora mismo no hay ninguna operación abierta."
+        )
+        return (
+            f"🤔 No tengo *{symbol}* entre las operaciones abiertas.\n\n"
+            f"{cola}\n\n"
+            "_Si ya se cerró, está en el histórico y no se puede volver a "
+            "tocar desde aquí._"
+        )
+
+    if reason == "bad_price":
+        return (
+            f"🤔 No entendí el precio de *{symbol}*.\n\n"
+            "Tiene que ser un número positivo. Valen tanto 280.5 como 280,5."
+        )
+
+    if reason == "below_stop" and record is not None:
+        instrument = get_instrument(record["symbol"])
+        return (
+            f"🤔 Ese precio está por debajo del stop de *{symbol}* "
+            f"({_fmt(record['stop'], instrument)}).\n\n"
+            "Una entrada ahí habría nacido cerrada, así que casi seguro es un "
+            "dedazo. No lo anoto: revisa el número y vuelve a mandarlo."
+        )
+
+    if reason == "unknown_entry":
+        return (
+            f"🤔 No sé a qué precio entraste en *{symbol}*, así que no puedo "
+            "calcular el resultado.\n\n"
+            "Dímelo en el mismo mensaje (primero la salida, después la "
+            f"entrada):\n/cerrar {symbol} SALIDA ENTRADA"
+        )
+
+    return f"No pude anotar el cambio en *{symbol}*. Usa /ayuda."
+
+
+def format_recent(history: list[dict], limit: int = 5) -> str:
+    """Las últimas señales que salieron del seguimiento, con su desenlace."""
+    recent = history[-limit:]
+    if not recent:
+        return "Todavía no hay señales cerradas."
+
+    lines = ["🗒️ *ÚLTIMAS SEÑALES RESUELTAS*", ""]
+    for record in reversed(recent):
+        mark, verdict = outcome_label(record)
+        ret = record.get("return_pct")
+        tail = f" ({ret * 100:+.1f}%)" if ret is not None else ""
+        lines.append(f"{mark} *{record['symbol']}* — {verdict}{tail}")
     return "\n".join(lines)
 
 
@@ -384,6 +593,10 @@ def format_performance(stats: dict) -> str:
         f"Resultado acumulado: *{stats['total_r']:+.1f}R*",
         f"Abiertas ahora: {stats.get('open', 0)}",
     ]
+    # Sin esta línea el rendimiento parece describir lo que hizo el usuario,
+    # cuando solo describe lo que el bot propuso y él aceptó.
+    if stats.get("not_taken"):
+        lines.append(f"Candidatos que dejaste pasar: {stats['not_taken']}")
     lines += [
         "",
         "_Estos son resultados en vivo sobre los candidatos que se enviaron._",
@@ -406,11 +619,19 @@ def format_help() -> str:
         "baten al índice de forma distinguible del azar. Lo que hace es "
         "ahorrarte mirar 141 gráficos cada mañana; la decisión es tuya.\n\n"
         "Comandos:\n"
-        "• /senales — Últimos candidatos enviados\n"
+        "• /senales — Últimos candidatos resueltos\n"
         "• /abiertas — Operaciones en curso\n"
         "• /rendimiento — Resultado real de lo que se cribó\n"
         "• /instrumentos — Universo vigilado\n"
         "• /ayuda — Este mensaje\n\n"
+        "Para contarme lo que hiciste de verdad:\n"
+        "• /tomada SÍMBOLO PRECIO — Entraste, y a qué precio\n"
+        "• /cerrar SÍMBOLO PRECIO — Saliste antes de tocar objetivo o stop\n"
+        "• /paso SÍMBOLO — No la tomaste\n\n"
+        "_Yo no veo tu cuenta: sin estos tres comandos doy por hecho que "
+        "tomaste todo lo que te mandé y que saliste donde decía el plan. El "
+        "seguimiento en vivo es la única medición que no viene de un "
+        "backtest; con datos inventados no mide nada._\n\n"
         "_Esto no es asesoría financiera. Las órdenes las colocas tú en "
         "Quantfury._"
     )

@@ -314,8 +314,94 @@ def cmd_track(args: argparse.Namespace) -> int:
 
 # ── Comandos de Telegram ──────────────────────────────────────────────────────
 
-def _handle_command(command: str, chat_id: str, state: TradingState,
-                    client: notify.TelegramClient) -> None:
+def _manual_taken(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/tomada SÍMBOLO PRECIO`."""
+    if len(args) < 2:
+        return notify.format_manual_usage("/tomada"), False
+
+    symbol = args[0]
+    price = notify.parse_price(args[1])
+    if price is None:
+        return notify.format_manual_error("bad_price", symbol), False
+
+    update = state.mark_taken(symbol, price)
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, symbol, state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_taken(update.record, update.warning), True
+
+
+def _manual_close(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/cerrar SÍMBOLO SALIDA [ENTRADA]`.
+
+    La entrada es opcional porque lo normal es que ya la haya dado `/tomada`.
+    Se acepta en el mismo mensaje para que el usuario que no la registró en su
+    momento pueda cerrar sin tener que reconstruir el pasado en dos pasos.
+    """
+    if len(args) < 2:
+        return notify.format_manual_usage("/cerrar"), False
+
+    symbol = args[0]
+    exit_price = notify.parse_price(args[1])
+    entry_price = notify.parse_price(args[2]) if len(args) > 2 else None
+    if exit_price is None or (len(args) > 2 and entry_price is None):
+        return notify.format_manual_error("bad_price", symbol), False
+
+    update = state.close_manually(symbol, exit_price, entry_price)
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, symbol, state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_manual_close(update.record), True
+
+
+def _manual_skip(args: list[str], state: TradingState) -> tuple[str, bool]:
+    """`/paso SÍMBOLO`."""
+    if not args:
+        return notify.format_manual_usage("/paso"), False
+
+    update = state.mark_skipped(args[0])
+    if not update.ok:
+        return (
+            notify.format_manual_error(
+                update.reason, args[0], state.open_symbols(), update.record
+            ),
+            False,
+        )
+    return notify.format_skipped(update.record), True
+
+
+def _handle_command(command: str, args: list[str], chat_id: str,
+                    state: TradingState, client: notify.TelegramClient) -> bool:
+    """Atiende un comando. Devuelve True si tocó el seguimiento.
+
+    Los tres comandos que corrigen el seguimiento (`/tomada`, `/cerrar`,
+    `/paso`) son los únicos que escriben algo que no se puede recuperar
+    volviendo a mirar el mercado: describen lo que el usuario hizo en su
+    cuenta, y el bot no tiene otra forma de saberlo.
+    """
+    if command in ("/tomada", "/tomado"):
+        text, changed = _manual_taken(args, state)
+        client.send(chat_id, text)
+        return changed
+
+    if command in ("/cerrar", "/cerrada"):
+        text, changed = _manual_close(args, state)
+        client.send(chat_id, text)
+        return changed
+
+    if command in ("/paso", "/notomada"):
+        text, changed = _manual_skip(args, state)
+        client.send(chat_id, text)
+        return changed
+
     if command in ("/ayuda", "/start", "/help"):
         client.send(chat_id, notify.format_help())
 
@@ -330,24 +416,25 @@ def _handle_command(command: str, chat_id: str, state: TradingState,
             for record in state.open_signals:
                 inst = universe.get(record["symbol"])
                 d = inst.price_decimals
+                # Si el usuario ya dijo a qué precio entró, se le enseña su
+                # número: es el que tiene delante en Quantfury.
+                if record.get("real_entry_price") is not None:
+                    head = f"entrada {record['real_entry_price']:.{d}f}"
+                else:
+                    head = f"entrada ≤{record['entry_max']:.{d}f}"
                 lines.append(
-                    f"• *{record['symbol']}* — entrada ≤{record['entry_max']:.{d}f} · "
+                    f"• *{record['symbol']}* — {head} · "
                     f"objetivo {record['target']:.{d}f} · stop {record['stop']:.{d}f}"
                 )
+            lines += [
+                "",
+                "_Si saliste de alguna, dímelo con /cerrar SÍMBOLO PRECIO. "
+                "Si no llegaste a tomarla, /paso SÍMBOLO._",
+            ]
             client.send(chat_id, "\n".join(lines))
 
     elif command in ("/senales", "/señales"):
-        recent = state.history[-5:]
-        if not recent:
-            client.send(chat_id, "Todavía no hay señales cerradas.")
-        else:
-            lines = ["🗒️ *ÚLTIMAS SEÑALES CERRADAS*", ""]
-            for record in reversed(recent):
-                mark = "✅" if record.get("is_win") else "❌"
-                ret = record.get("return_pct")
-                tail = f" ({ret * 100:+.1f}%)" if ret is not None else ""
-                lines.append(f"{mark} {record['symbol']} — {record.get('outcome')}{tail}")
-            client.send(chat_id, "\n".join(lines))
+        client.send(chat_id, notify.format_recent(state.history))
 
     elif command in ("/instrumentos", "/universo"):
         client.send(
@@ -361,6 +448,8 @@ def _handle_command(command: str, chat_id: str, state: TradingState,
         )
     else:
         client.send(chat_id, "Comando desconocido. Usa /ayuda.")
+
+    return False
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -388,9 +477,11 @@ def cmd_poll(args: argparse.Namespace) -> int:
         if not text.startswith("/"):
             continue
 
-        command = text.split()[0].lower().split("@")[0]
+        parts = text.split()
+        command = parts[0].lower().split("@")[0]
         print(f"[INFO] Comando '{command}' de {chat_id}")
-        _handle_command(command, chat_id, state, client)
+        if _handle_command(command, parts[1:], chat_id, state, client):
+            changed = True
 
     if changed:
         state.save(STATE_FILE)

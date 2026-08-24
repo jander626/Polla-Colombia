@@ -140,7 +140,7 @@ El workflow `Cribador diario` corre solo de lunes a viernes. Escribe
 
 | Comando | Qué hace |
 |---|---|
-| `/senales` | Últimos candidatos enviados |
+| `/senales` | Últimos candidatos resueltos |
 | `/abiertas` | Operaciones en curso |
 | `/rendimiento` | Acierto real frente a la confianza prometida |
 | `/instrumentos` | Universo vigilado |
@@ -149,6 +149,43 @@ El workflow `Cribador diario` corre solo de lunes a viernes. Escribe
 `/rendimiento` es el control externo de la calibración. Si el acierto real
 queda sistemáticamente por debajo de lo prometido, la tabla está mal y hay que
 rehacer el backtest.
+
+### Contarle lo que hiciste de verdad
+
+El bot no ve tu cuenta de Quantfury. Sin estos tres comandos da por hecho que
+tomaste todo lo que te mandó y que saliste donde decía el plan, y eso mete
+operaciones inventadas en la única medición que no viene de un backtest.
+
+| Comando | Cuándo |
+|---|---|
+| `/tomada SÍMBOLO PRECIO` | Entraste. Registra tu precio real de entrada |
+| `/cerrar SÍMBOLO PRECIO` | Saliste antes de tocar objetivo o stop |
+| `/paso SÍMBOLO` | No llegaste a tomarla |
+
+```
+/tomada TXN 282,10
+/cerrar TXN 291,40
+/paso NVDA
+```
+
+Detalles que importan:
+
+- El precio se lee con coma o con punto: `282,10` y `282.10` valen igual.
+- Si nunca registraste la entrada, dala en el mismo mensaje —primero la
+  salida, después la entrada—: `/cerrar TXN 291,40 282,10`. Sin entrada el bot
+  se niega a cerrar en vez de inventar el precio con el techo de la zona.
+- `/paso` saca el candidato del seguimiento **sin** contarlo como fallo: no se
+  arriesgó dinero en él. Aparece en `/rendimiento` como "candidatos que
+  dejaste pasar".
+- La R se mide siempre contra el riesgo planificado (techo de la zona menos
+  stop), igual que en el backtest, porque es el que conocías al dimensionar.
+- Si dices que entraste por encima del techo de la zona, queda registrado
+  —pasó de verdad—, pero el simulador no puede seguir una orden que nunca
+  habría ejecutado: esa operación solo se cierra con `/cerrar`.
+
+Antes de esto, los tres casos se corregían editando `trading_state.json` a
+mano. Así se arreglaron ABBV (cerrada a mano en 266 con el objetivo en 268.27)
+y F (enviada pero no tomada).
 
 ---
 

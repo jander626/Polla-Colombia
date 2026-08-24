@@ -82,8 +82,8 @@ en Python, no en el cron.
 Es ahora **la única medición que no viene de un backtest**, y por tanto la
 única que puede llegar a demostrar algo. Protégela.
 
-El usuario opera a mano, así que cada candidato tiene tres desenlaces y el bot
-solo modela uno:
+El usuario opera a mano, así que cada candidato tiene tres desenlaces y el
+simulador solo modela uno:
 
 1. Lo toma y sale por objetivo o stop → el seguimiento lo resuelve bien solo.
 2. Lo toma y **sale cuando quiere** → el seguimiento registraría una salida
@@ -91,9 +91,31 @@ solo modela uno:
 3. **No lo toma** → el seguimiento anotaría una operación que nadie tuvo. Pasó
    con F, marcada `status: "not_taken"`.
 
-Hoy se corrige a mano editando `trading_state.json`. Está pendiente montar
-`/cerrar SÍMBOLO PRECIO`, `/paso SÍMBOLO` y `/tomada SÍMBOLO PRECIO` en
-Telegram para que deje de depender de que el usuario lo cuente por chat.
+Los casos 2 y 3 se corregían editando `trading_state.json` a mano. Desde el 24
+de agosto de 2026 se cuentan por Telegram: `/tomada SÍMBOLO PRECIO`,
+`/cerrar SÍMBOLO PRECIO` y `/paso SÍMBOLO`, con `TradingState.mark_taken`,
+`close_manually` y `mark_skipped` detrás.
+
+Cuatro reglas de ese código que no son adorno:
+
+- **Sin precio de entrada no se cierra.** `/cerrar` sobre algo que nunca pasó
+  por `/tomada` se niega y pide el dato (`/cerrar TXN 291,40 282,10`).
+  Rellenarlo con el techo de la zona daría un número creíble y falso, que es
+  peor que no dar ninguno.
+- **`/tomada` no reemplaza al simulador, solo el precio.** La salida la sigue
+  decidiendo `simulate_signal`; lo único que cambia es contra qué entrada se
+  miden R y retorno, y el precio simulado se conserva en
+  `simulated_entry_price` para poder auditar la diferencia.
+- **Una entrada tomada fuera de la zona no caduca.** Si el usuario dice que
+  entró donde el simulador nunca habría ejecutado, la operación se queda
+  abierta esperando `/cerrar` en vez de irse al histórico como `expired` con
+  la posición todavía viva. Manda el usuario, no el simulador.
+- **Una entrada por debajo del stop se rechaza.** Habría nacido cerrada: es un
+  dedazo, y aceptarlo en silencio envenena la única medición real que hay.
+
+`/paso` no cuenta como fallo —no se arriesgó dinero— y sale en `/rendimiento`
+como "candidatos que dejaste pasar", que es el número que impide leer el
+rendimiento como si describiera lo que hizo el usuario.
 
 ## Cómo se trabaja
 
