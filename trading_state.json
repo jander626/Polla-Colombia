@@ -4,8 +4,74 @@
     "8635569997"
   ],
   "tg_offset": 419999581,
-  "last_scan_date": "2026-08-24",
-  "open_signals": [],
+  "last_scan_date": "2026-08-25",
+  "open_signals": [
+    {
+      "symbol": "NVDA",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:09+00:00",
+      "score": 99.04,
+      "confidence": 0.0,
+      "entry_max": 210.40095060655645,
+      "stop": 205.2784156557392,
+      "target": 216.804119295078,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "INTC",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:11+00:00",
+      "score": 97.07,
+      "confidence": 0.0,
+      "entry_max": 89.17667451420935,
+      "stop": 84.06554247631776,
+      "target": 95.56558956157384,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "KLAC",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:13+00:00",
+      "score": 95.63,
+      "confidence": 0.0,
+      "entry_max": 184.97480704825213,
+      "stop": 175.31506765058262,
+      "target": 196.32413054242593,
+      "risk_reward": 1.175
+    },
+    {
+      "symbol": "TXN",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:15+00:00",
+      "score": 94.85,
+      "confidence": 0.0,
+      "entry_max": 262.0848725960295,
+      "stop": 253.69854567328403,
+      "target": 272.5677812494614,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "RTX",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:17+00:00",
+      "score": 88.47,
+      "confidence": 0.0,
+      "entry_max": 210.65504793543474,
+      "stop": 206.82825344094206,
+      "target": 215.43854105355058,
+      "risk_reward": 1.25
+    }
+  ],
   "history": [
     {
       "symbol": "ABBV",
