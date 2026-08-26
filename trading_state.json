@@ -4,7 +4,7 @@
     "8635569997"
   ],
   "tg_offset": 419999581,
-  "last_scan_date": "2026-08-25",
+  "last_scan_date": "2026-08-26",
   "open_signals": [
     {
       "symbol": "NVDA",
@@ -70,6 +70,58 @@
       "stop": 206.82825344094206,
       "target": 215.43854105355058,
       "risk_reward": 1.25
+    },
+    {
+      "symbol": "CVX",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-25",
+      "alerted_at": "2026-08-26T10:44:18+00:00",
+      "score": 92.67,
+      "confidence": 0.0,
+      "entry_max": 201.08709634846997,
+      "stop": 193.35096788384334,
+      "target": 205.07741751003653,
+      "risk_reward": 0.516
+    },
+    {
+      "symbol": "AMAT",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-25",
+      "alerted_at": "2026-08-26T10:44:20+00:00",
+      "score": 91.56,
+      "confidence": 0.0,
+      "entry_max": 489.1462532422463,
+      "stop": 464.8629352629228,
+      "target": 519.5004007164007,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "LMT",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-25",
+      "alerted_at": "2026-08-26T10:44:22+00:00",
+      "score": 88.37,
+      "confidence": 0.0,
+      "entry_max": 561.0366549354069,
+      "stop": 548.9922951076553,
+      "target": 576.0921047200964,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "XOM",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-25",
+      "alerted_at": "2026-08-26T10:44:24+00:00",
+      "score": 85.31,
+      "confidence": 0.0,
+      "entry_max": 161.7213413192004,
+      "stop": 157.06954289359987,
+      "target": 165.32581238320176,
+      "risk_reward": 0.775
     }
   ],
   "history": [
