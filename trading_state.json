@@ -98,19 +98,6 @@
       "risk_reward": 1.25
     },
     {
-      "symbol": "XOM",
-      "asset_class": "stock",
-      "direction": "long",
-      "signal_date": "2026-08-25",
-      "alerted_at": "2026-08-26T10:44:24+00:00",
-      "score": 85.31,
-      "confidence": 0.0,
-      "entry_max": 161.7213413192004,
-      "stop": 157.06954289359987,
-      "target": 165.32581238320176,
-      "risk_reward": 0.775
-    },
-    {
       "symbol": "LLY",
       "asset_class": "stock",
       "direction": "long",
@@ -255,6 +242,28 @@
       "r_multiple": 2.4185,
       "return_pct": 0.0579,
       "is_win": true
+    },
+    {
+      "symbol": "XOM",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-25",
+      "alerted_at": "2026-08-26T10:44:24+00:00",
+      "score": 85.31,
+      "confidence": 0.0,
+      "entry_max": 161.7213413192004,
+      "stop": 157.06954289359987,
+      "target": 165.32581238320176,
+      "risk_reward": 0.775,
+      "status": "closed",
+      "outcome": "loss",
+      "entry_price": 158.0,
+      "exit_price": 157.06954289359987,
+      "entry_date": "2026-08-26",
+      "exit_date": "2026-08-27",
+      "r_multiple": -0.2,
+      "return_pct": -0.0069,
+      "is_win": false
     }
   ]
 }
