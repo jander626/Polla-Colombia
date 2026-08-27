@@ -4,7 +4,7 @@
     "8635569997"
   ],
   "tg_offset": 419999581,
-  "last_scan_date": "2026-08-26",
+  "last_scan_date": "2026-08-27",
   "open_signals": [
     {
       "symbol": "INTC",
@@ -109,6 +109,71 @@
       "stop": 157.06954289359987,
       "target": 165.32581238320176,
       "risk_reward": 0.775
+    },
+    {
+      "symbol": "LLY",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-27",
+      "alerted_at": "2026-08-27T13:57:17+00:00",
+      "score": 90.39,
+      "confidence": 0.0,
+      "entry_max": 1191.46034493539,
+      "stop": 1159.53821835487,
+      "target": 1231.0781613866893,
+      "risk_reward": 1.241
+    },
+    {
+      "symbol": "EOG",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-27",
+      "alerted_at": "2026-08-27T13:57:19+00:00",
+      "score": 88.27,
+      "confidence": 0.0,
+      "entry_max": 145.08479837531164,
+      "stop": 140.95506720822945,
+      "target": 148.634126293017,
+      "risk_reward": 0.859
+    },
+    {
+      "symbol": "COP",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-27",
+      "alerted_at": "2026-08-27T13:57:21+00:00",
+      "score": 86.6,
+      "confidence": 0.0,
+      "entry_max": 130.28535877663592,
+      "stop": 124.83321374112137,
+      "target": 133.35322136542229,
+      "risk_reward": 0.563
+    },
+    {
+      "symbol": "ABT",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-27",
+      "alerted_at": "2026-08-27T13:57:24+00:00",
+      "score": 85.98,
+      "confidence": 0.0,
+      "entry_max": 113.26244148186098,
+      "stop": 109.10251950604633,
+      "target": 115.73724642139757,
+      "risk_reward": 0.595
+    },
+    {
+      "symbol": "KO",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-27",
+      "alerted_at": "2026-08-27T13:57:26+00:00",
+      "score": 81.46,
+      "confidence": 0.0,
+      "entry_max": 89.52579433389108,
+      "stop": 86.6947352220363,
+      "target": 91.07844211352801,
+      "risk_reward": 0.548
     }
   ],
   "history": [
