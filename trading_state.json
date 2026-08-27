@@ -7,19 +7,6 @@
   "last_scan_date": "2026-08-26",
   "open_signals": [
     {
-      "symbol": "NVDA",
-      "asset_class": "stock",
-      "direction": "long",
-      "signal_date": "2026-08-24",
-      "alerted_at": "2026-08-25T10:41:09+00:00",
-      "score": 99.04,
-      "confidence": 0.0,
-      "entry_max": 210.40095060655645,
-      "stop": 205.2784156557392,
-      "target": 216.804119295078,
-      "risk_reward": 1.25
-    },
-    {
       "symbol": "INTC",
       "asset_class": "stock",
       "direction": "long",
@@ -181,6 +168,28 @@
       "r_multiple": -0.8475,
       "return_pct": -0.0595,
       "is_win": false
+    },
+    {
+      "symbol": "NVDA",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-24",
+      "alerted_at": "2026-08-25T10:41:09+00:00",
+      "score": 99.04,
+      "confidence": 0.0,
+      "entry_max": 210.40095060655645,
+      "stop": 205.2784156557392,
+      "target": 216.804119295078,
+      "risk_reward": 1.25,
+      "status": "closed",
+      "outcome": "win",
+      "entry_price": 210.40095060655645,
+      "exit_price": 222.79,
+      "entry_date": "2026-08-25",
+      "exit_date": "2026-08-27",
+      "r_multiple": 2.4185,
+      "return_pct": 0.0579,
+      "is_win": true
     }
   ]
 }
