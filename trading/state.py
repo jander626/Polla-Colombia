@@ -68,6 +68,12 @@ class TradingState:
     chat_ids: list[str] = field(default_factory=list)
     tg_offset: int = 0
     last_scan_date: str = ""           # ISO, evita reenviar el mismo día
+    # ISO, evita revisar stop/target más de una vez al día. Sin esto, cada
+    # disparo del cron (hasta ~17 al día) repetía la consulta de mercado con
+    # las mismas velas diarias: gastaba cupo de Twelve Data sin aprender nada
+    # nuevo, porque una vela diaria no cambia entre un disparo y el siguiente
+    # de la misma jornada.
+    last_track_date: str = ""
     open_signals: list[dict] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
 
@@ -90,6 +96,7 @@ class TradingState:
             chat_ids=[str(c) for c in raw.get("chat_ids", [])],
             tg_offset=int(raw.get("tg_offset", 0)),
             last_scan_date=str(raw.get("last_scan_date", "")),
+            last_track_date=str(raw.get("last_track_date", "")),
             open_signals=list(raw.get("open_signals", [])),
             history=list(raw.get("history", [])),
         )
@@ -118,6 +125,12 @@ class TradingState:
 
     def mark_scanned(self, day: date) -> None:
         self.last_scan_date = day.isoformat()
+
+    def already_tracked(self, day: date) -> bool:
+        return self.last_track_date == day.isoformat()
+
+    def mark_tracked(self, day: date) -> None:
+        self.last_track_date = day.isoformat()
 
     # ── Señales ───────────────────────────────────────────────────────────────
 

@@ -324,9 +324,26 @@ def cmd_scan(args: argparse.Namespace) -> int:
 # ── Seguimiento ───────────────────────────────────────────────────────────────
 
 def cmd_track(args: argparse.Namespace) -> int:
+    from trading.schedule import now_ny
+
     state = TradingState.load(STATE_FILE)
+    today = now_ny().date()
+
+    if not args.force and state.already_tracked(today):
+        # El cron dispara hasta ~17 veces al día y cada una ejecuta este modo
+        # dentro de `auto`. Sin este corte, cada disparo repetía la misma
+        # consulta de mercado sobre las mismas velas diarias: no cambia nada
+        # entre un disparo de las 10:00 y uno de las 15:00 si el día de
+        # mercado no ha cerrado todavía. Una vez al día es lo que hay que
+        # verificar, no una vez por disparo.
+        print(f"[INFO] Ya se revisó hoy ({today}); no toca seguimiento")
+        return 0
+
     if not state.open_signals:
         print("[INFO] No hay operaciones abiertas que seguir")
+        if not args.dry_run:
+            state.mark_tracked(today)
+            state.save(STATE_FILE)
         return 0
 
     instruments = [universe.get(s) for s in state.open_symbols()]
@@ -338,6 +355,8 @@ def cmd_track(args: argparse.Namespace) -> int:
     bars = market.get_many(instruments, bars=90)
 
     closed = state.update_open_signals(bars, DEFAULT_BACKTEST)
+    if not args.dry_run:
+        state.mark_tracked(today)
     if not closed:
         print(f"[INFO] Ninguna se resolvió; siguen abiertas {len(state.open_signals)}")
         state.save(STATE_FILE)
@@ -707,9 +726,12 @@ def main() -> int:
     p.add_argument("--no-llm", action="store_true", help="Sin filtro de noticias")
     p.set_defaults(func=cmd_scan)
 
-    common(sub.add_parser("track", help="Revisa las operaciones abiertas")).set_defaults(
-        func=cmd_track
+    p = common(sub.add_parser("track", help="Revisa las operaciones abiertas"))
+    p.add_argument(
+        "--force", action="store_true",
+        help="Repite la revisión aunque ya se haya hecho hoy",
     )
+    p.set_defaults(func=cmd_track)
     common(sub.add_parser("poll", help="Atiende comandos"), dry=False).set_defaults(
         func=cmd_poll
     )

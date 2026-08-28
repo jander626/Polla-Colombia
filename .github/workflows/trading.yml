@@ -10,8 +10,16 @@ on:
   #
   # 10:00–14:00 UTC cubre esa ventana en verano (10:00–13:25 UTC) y en
   # invierno (11:00–14:25 UTC).
+  #
+  # Los minutos NO son :00/:15/:30/:45 a propósito. GitHub documenta que la
+  # carga de Actions es mayor justo en la hora en punto y sus múltiplos
+  # redondos, porque ahí coinciden los cron de todo el mundo; un disparo
+  # exactamente ahí es el que antes se perdía. El 27 de agosto ilustró el
+  # caso extremo: CERO disparos entre las 10:00 y las 14:00 UTC ese día, y
+  # uno solo, aislado, a las 20:03 UTC. Descuadrar el minuto no lo arregla
+  # del todo, pero es la mitigación que el propio GitHub recomienda.
   schedule:
-    - cron: "*/15 10-14 * * 1-5"
+    - cron: "7,22,37,52 10-14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:

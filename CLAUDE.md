@@ -79,6 +79,24 @@ dispara dos o tres veces al día a horas impredecibles. Por eso la ventana de
 escaneo es ancha (06:00–09:25 de Nueva York) y la decisión de escanear se toma
 en Python, no en el cron.
 
+El 27 de agosto de 2026 se vio el caso extremo: **cero disparos** en toda la
+ventana de la mañana, dos días seguidos, y luego uno solo, aislado, a las
+20:03 UTC —muy fuera de las horas pedidas (`10-14 * * 1-5`)—. GitHub explica
+por qué: la carga de Actions es mayor justo en la hora en punto y sus
+múltiplos redondos, porque ahí coinciden los cron de todo el mundo. Por eso
+`trading.yml` dispara en `7,22,37,52`, no en `*/15` — descuadrar el minuto es
+la mitigación que GitHub mismo recomienda, aunque no elimina el problema.
+
+Ese mismo incidente destapó otro: `track` (revisión de stop/target) no tenía
+ninguna deduplicación, así que cada disparo del cron —hasta ~17 al día
+cuando sí disparaba— repetía la consulta de mercado contra las mismas velas
+diarias, sin aprender nada nuevo entre una y la siguiente del mismo día.
+`TradingState.already_tracked`/`mark_tracked` (mismo patrón que ya protegía
+al escaneo) lo corta a una vez por día; `--force` lo salta para depurar a
+mano. `poll` no lleva este corte a propósito: es barato (sin llamadas a
+datos de mercado) y conviene que responda a `/tomada`, `/cerrar` y `/paso`
+en cualquier disparo, no solo el de la mañana.
+
 ## Estado del seguimiento en vivo
 
 Es ahora **la única medición que no viene de un backtest**, y por tanto la
