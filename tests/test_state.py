@@ -97,6 +97,32 @@ def test_marking_a_scan_prevents_repeating_it():
     assert not state.already_scanned(date(2026, 8, 13))
 
 
+def test_marking_a_track_prevents_repeating_it():
+    """El 27 de agosto de 2026 el cron disparó `auto` (y con él, track) hasta
+    diecisiete veces contra las mismas velas diarias: gastaba cupo de Twelve
+    Data sin aprender nada nuevo entre un disparo y el siguiente del mismo
+    día. Este es el mismo corte que ya protegía al escaneo, aplicado a track.
+    """
+    from datetime import date
+
+    state = TradingState()
+    day = date(2026, 8, 27)
+    assert not state.already_tracked(day)
+    state.mark_tracked(day)
+    assert state.already_tracked(day)
+    assert not state.already_tracked(date(2026, 8, 28))
+
+
+def test_scan_and_track_dedup_are_independent():
+    """Marcar uno no puede marcar el otro: son verificaciones distintas."""
+    from datetime import date
+
+    state = TradingState()
+    day = date(2026, 8, 27)
+    state.mark_scanned(day)
+    assert state.already_scanned(day) and not state.already_tracked(day)
+
+
 # ── Resolución ────────────────────────────────────────────────────────────────
 
 def test_a_signal_with_no_history_yet_is_pending():
@@ -306,3 +332,41 @@ def test_a_free_symbol_is_prepared_for_delivery():
     assert delivery.has_messages
     assert delivery.already_open == []
     assert delivery.messages[0][0].symbol == "MSFT"
+
+
+# ── cmd_track no repite la consulta de mercado el mismo día ─────────────────
+
+def test_cmd_track_only_hits_the_market_once_per_day(tmp_path, monkeypatch):
+    """Reproduce el 27 de agosto: el cron dispara `auto` varias veces en el
+    mismo día y cada una ejecutaba `track` contra las mismas velas diarias.
+    Con el corte, la segunda llamada del mismo día no debe tocar el mercado.
+    """
+    import argparse
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import trading_bot
+    from trading.data import MarketData
+
+    state_path = str(tmp_path / "estado.json")
+    state = TradingState(open_signals=[make_record("AAPL")])
+    state.save(state_path)
+    monkeypatch.setattr(trading_bot, "STATE_FILE", state_path)
+
+    llamadas = []
+    monkeypatch.setattr(
+        MarketData, "get_many",
+        lambda self, instruments, bars=90: (llamadas.append(1) or {})
+    )
+
+    args = argparse.Namespace(offline=True, dry_run=False, force=False)
+
+    trading_bot.cmd_track(args)   # primer disparo del día: sí consulta
+    assert len(llamadas) == 1
+
+    trading_bot.cmd_track(args)   # segundo disparo, mismo día: no debería
+    assert len(llamadas) == 1, "no debe volver a tocar el mercado el mismo día"
+
+    trading_bot.cmd_track(argparse.Namespace(offline=True, dry_run=False, force=True))
+    assert len(llamadas) == 2, "--force sí debe saltarse el corte"
