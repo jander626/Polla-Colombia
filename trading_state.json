@@ -4,7 +4,8 @@
     "8635569997"
   ],
   "tg_offset": 419999581,
-  "last_scan_date": "2026-08-27",
+  "last_scan_date": "2026-08-28",
+  "last_track_date": "2026-08-28",
   "open_signals": [
     {
       "symbol": "INTC",
@@ -161,6 +162,58 @@
       "stop": 86.6947352220363,
       "target": 91.07844211352801,
       "risk_reward": 0.548
+    },
+    {
+      "symbol": "XOM",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-28",
+      "alerted_at": "2026-08-28T14:28:02+00:00",
+      "score": 96.73,
+      "confidence": 0.0,
+      "entry_max": 156.91136132869028,
+      "stop": 154.2677311188495,
+      "target": 160.21589909099126,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "REGN",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-28",
+      "alerted_at": "2026-08-28T14:28:04+00:00",
+      "score": 88.62,
+      "confidence": 0.0,
+      "entry_max": 803.2992211702136,
+      "stop": 788.5679647163106,
+      "target": 821.7132917375924,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "MMM",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-28",
+      "alerted_at": "2026-08-28T14:28:06+00:00",
+      "score": 87.51,
+      "confidence": 0.0,
+      "entry_max": 176.95163288198438,
+      "stop": 174.20061186335934,
+      "target": 180.39040915526567,
+      "risk_reward": 1.25
+    },
+    {
+      "symbol": "MDLZ",
+      "asset_class": "stock",
+      "direction": "long",
+      "signal_date": "2026-08-28",
+      "alerted_at": "2026-08-28T14:28:09+00:00",
+      "score": 86.26,
+      "confidence": 0.0,
+      "entry_max": 62.71493578624452,
+      "stop": 61.688440356259136,
+      "target": 63.99805507372624,
+      "risk_reward": 1.25
     }
   ],
   "history": [
